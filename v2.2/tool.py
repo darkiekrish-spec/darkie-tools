@@ -259,7 +259,7 @@ def ensure_deps():
     if MISSING_SYSTEM:
         missing_names = [pkg for _, pkg in MISSING_SYSTEM]
         print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(missing_names)}{RESET}")
-        ans = input(f"  {c(f'Install missing system tools? (y/n) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+        ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
         if ans == "y":
             _install_missing()
             MISSING_SYSTEM = []
