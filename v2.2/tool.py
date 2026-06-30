@@ -218,12 +218,51 @@ def _run_as_admin(cmd_list, reason=""):
         return False
 
 
+def _ensure_pip_installed():
+    try:
+        importlib.import_module("pip")
+        return True
+    except ImportError:
+        pass
+    _, pkg_mgr = _detect_os()
+    pip_pkg_map = {
+        "apt": "python3-pip",
+        "dnf": "python3-pip",
+        "pacman": "python-pip",
+        "apk": "py3-pip",
+        "zypper": "python3-pip",
+        "brew": "python-pip",
+        "choco": "python3-pip",
+    }
+    pkg = pip_pkg_map.get(pkg_mgr)
+    if not pkg:
+        print(f"  {RED}{SYM_X}  Don't know how to install pip on this system.{RESET}")
+        return False
+    print(f"  {YELLOW}Pip not found. Installing {pkg} via {pkg_mgr}...{RESET}")
+    info = PKG_MANAGERS.get(pkg_mgr)
+    if info is None:
+        return False
+    if info.get("update"):
+        _run_as_admin(info["update"], f"Updating {pkg_mgr} cache")
+    success = _run_as_admin(info["install"] + [pkg], f"Installing {pkg}")
+    if success:
+        try:
+            importlib.import_module("pip")
+            return True
+        except ImportError:
+            pass
+    return False
+
+
 def _install_missing():
     _, pkg_mgr = _detect_os()
     if MISSING_PIPS:
-        print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-        pip_cmd = [sys.executable, "-m", "pip", "install"] + MISSING_PIPS
-        _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
+        if _ensure_pip_installed():
+            print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
+            pip_cmd = [sys.executable, "-m", "pip", "install"] + MISSING_PIPS
+            _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
+        else:
+            print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable).{RESET}")
     if MISSING_SYSTEM:
         missing_names = [pkg for _, pkg in MISSING_SYSTEM]
         print(f"\n  {YELLOW}Installing system packages: {', '.join(missing_names)}{RESET}")
@@ -247,20 +286,23 @@ def ensure_deps():
     _check_pip_deps()
     if MISSING_PIPS:
         print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-        print(f"  {CYAN}Auto-installing Python packages...{RESET}")
-        _run_as_admin([sys.executable, "-m", "pip", "install"] + MISSING_PIPS, "pip install missing packages")
-        MISSING_PIPS = []
-        _check_pip_deps()
-        if MISSING_PIPS:
-            print(f"  {RED}{SYM_X}  Some Python deps still missing. Try: pip install {' '.join(MISSING_PIPS)}{RESET}")
+        if _ensure_pip_installed():
+            print(f"  {CYAN}Auto-installing Python packages...{RESET}")
+            _run_as_admin([sys.executable, "-m", "pip", "install"] + MISSING_PIPS, "pip install missing packages")
+            MISSING_PIPS = []
+            _check_pip_deps()
+            if MISSING_PIPS:
+                print(f"  {RED}{SYM_X}  Some Python deps still missing. Try: pip install {' '.join(MISSING_PIPS)}{RESET}")
+            else:
+                print(f"  {GREEN}{SYM_CHECK}  Python dependencies satisfied!{RESET}")
         else:
-            print(f"  {GREEN}{SYM_CHECK}  Python dependencies satisfied!{RESET}")
+            print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable). Install python3-pip manually.{RESET}")
     _check_system_deps()
     if MISSING_SYSTEM:
         missing_names = [pkg for _, pkg in MISSING_SYSTEM]
         print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(missing_names)}{RESET}")
-        ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
-        if ans == "y":
+        if _is_root():
+            print(f"  {CYAN}Auto-installing system tools (running as root)...{RESET}")
             _install_missing()
             MISSING_SYSTEM = []
             _check_system_deps()
@@ -269,7 +311,17 @@ def ensure_deps():
             else:
                 print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
         else:
-            print(f"  {YELLOW}Skipping system tool installation. Some features may be limited.{RESET}")
+            ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+            if ans == "y":
+                _install_missing()
+                MISSING_SYSTEM = []
+                _check_system_deps()
+                if MISSING_SYSTEM:
+                    print(f"  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
+                else:
+                    print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
+            else:
+                print(f"  {YELLOW}Skipping system tool installation. Some features may be limited.{RESET}")
     elif not MISSING_PIPS:
         print(f"  {GREEN}{SYM_CHECK}  All dependencies found!{RESET}")
 
