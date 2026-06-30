@@ -48,6 +48,8 @@ SYSTEM_DEPS_COMMON = {
     "host": "host",
     "dig": "bind9-dnsutils",
     "whois": "whois",
+    "traceroute": "traceroute",
+    "aircrack-ng": "aircrack-ng",
     "tcpdump": "tcpdump",
     "iptables": "iptables",
 }
@@ -238,27 +240,37 @@ def _install_missing():
 
 
 def ensure_deps():
+    global MISSING_PIPS, MISSING_SYSTEM
     print(f"\n{CYAN}{BOLD}{SYM_BOX_TL}{'='*50}{SYM_BOX_TR}{RESET}")
     print(f"{CYAN}{BOLD}{SYM_BOX_V}  Checking dependencies...{' ' * 29}{SYM_BOX_V}{RESET}")
     print(f"{CYAN}{BOLD}{SYM_BOX_BL}{'='*50}{SYM_BOX_BR}{RESET}")
     _check_pip_deps()
-    _check_system_deps()
-    if MISSING_PIPS or MISSING_SYSTEM:
-        if MISSING_PIPS:
-            print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-        if MISSING_SYSTEM:
-            missing_names = [pkg for _, pkg in MISSING_SYSTEM]
-            print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(missing_names)}{RESET}")
-        print(f"  {CYAN}Auto-installing missing dependencies...{RESET}")
-        _install_missing()
-        print()
+    if MISSING_PIPS:
+        print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
+        print(f"  {CYAN}Auto-installing Python packages...{RESET}")
+        _run_as_admin([sys.executable, "-m", "pip", "install"] + MISSING_PIPS, "pip install missing packages")
+        MISSING_PIPS = []
         _check_pip_deps()
-        _check_system_deps()
-        if MISSING_PIPS or MISSING_SYSTEM:
-            print(f"  {RED}{SYM_X}  Some deps still missing. Try installing manually.{RESET}")
+        if MISSING_PIPS:
+            print(f"  {RED}{SYM_X}  Some Python deps still missing. Try: pip install {' '.join(MISSING_PIPS)}{RESET}")
         else:
-            print(f"  {GREEN}{SYM_CHECK}  All dependencies satisfied!{RESET}")
-    else:
+            print(f"  {GREEN}{SYM_CHECK}  Python dependencies satisfied!{RESET}")
+    _check_system_deps()
+    if MISSING_SYSTEM:
+        missing_names = [pkg for _, pkg in MISSING_SYSTEM]
+        print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(missing_names)}{RESET}")
+        ans = input(f"  {c(f'Install missing system tools? (y/n) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+        if ans == "y":
+            _install_missing()
+            MISSING_SYSTEM = []
+            _check_system_deps()
+            if MISSING_SYSTEM:
+                print(f"  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
+            else:
+                print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
+        else:
+            print(f"  {YELLOW}Skipping system tool installation. Some features may be limited.{RESET}")
+    elif not MISSING_PIPS:
         print(f"  {GREEN}{SYM_CHECK}  All dependencies found!{RESET}")
 
 

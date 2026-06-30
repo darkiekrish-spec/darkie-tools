@@ -1,23 +1,25 @@
-# Darkie Security Suite v3.0 — GOAT Edition
+# Darkie Security Suite
 
 Advanced Cybersecurity & Network Defense Platform — 60+ tools across 16 modules.
 
-## What's New in v3.0
+## Versions
 
-- **Mineflayer Minecraft bots** auto-installed on startup
-- **6 new modules**: Hash/Crypto, System Audit, Advanced Network, Advanced OSINT, WiFi Security, Report Generator
-- **Auto-dependency installer** for both Python and Node.js packages
-- **One-command launcher** (`./run.sh`)
-- **HTML report generation** from session findings
+| Version | Directory | Description |
+|---------|-----------|-------------|
+| v1.0 | `stress_test.py` | Basic stress testing (Minecraft + Web) |
+| v1.2 | `v1.2/` | Added IP flood stress test |
+| v1.3 | `v1.3/` | Added OSINT, telephone tools, network utilities, web recon |
+| v2 | `v2/` | Modular refactor with 6 modules (network threat, endpoint, vuln, data, pentest, SIEM) |
+| v2.1 | `v2.1/` | "GOAT Edition" — Added Mineflayer bots, 10 more modules, animated UI |
+| v2.2 | `v2.2/` | Latest — Refined v2 with full 16 modules and auto-dependency installer |
 
 ## Quick Start
 
 ```bash
-# Option 1: Universal launcher (auto-installs everything)
-chmod +x run.sh
-./run.sh
+# Latest version (auto-installs dependencies)
+python3 v2.2/tool.py
 
-# Option 2: Direct Python
+# Or v2.1 GOAT Edition
 python3 v2.1/tool.py
 ```
 
@@ -45,19 +47,25 @@ python3 v2.1/tool.py
 ## Requirements
 
 - **Python 3.10+**
-- **Node.js 18+** (for Minecraft Mineflayer bots)
+- **Node.js 18+** (for Minecraft Mineflayer bots — v2.1+)
 - **Linux** (primary), macOS, Windows (limited)
 
-### Auto-installed Python packages
-colorama, requests, psutil, cryptography, scapy, beautifulsoup4, lxml, dnspython, netifaces
-
-### Auto-installed Node.js packages
-mineflayer, prismarine-chunk, prismarine-world
-
-### Optional system tools (for full functionality)
-```bash
-sudo apt install nmap dnsutils whois traceroute aircrack-ng
+### Python packages (auto-installed)
 ```
+colorama, requests, psutil, cryptography, netifaces,
+beautifulsoup4, lxml, dnspython, ipwhois, python-nmap
+```
+`scapy` is optional — auto-detected if installed, graceful fallback if not.
+
+### Node.js packages (auto-installed, v2.1+)
+```
+mineflayer, prismarine-chunk, prismarine-world
+```
+
+### System tools (auto-detected, prompted install)
+The tool checks for `nmap`, `host`, `dig`, `whois`, `traceroute`, `aircrack-ng`, `tcpdump`, and `iptables` on startup. If any are missing, you'll be prompted to install them automatically via your platform's package manager.
+
+Supported package managers: `apt` (Debian/Ubuntu/Kali), `dnf` (Fedora/RHEL), `pacman` (Arch), `apk` (Alpine), `zypper` (openSUSE), `brew` (macOS), `choco` (Windows).
 
 ## Legal Disclaimer
 

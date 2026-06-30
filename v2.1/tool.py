@@ -25,7 +25,7 @@ MISSING_SYSTEM = []
 
 PIP_DEPS = {"colorama": "colorama", "requests": "requests", "psutil": "psutil", "cryptography": "cryptography"}
 
-SYSTEM_DEPS_COMMON = {"nmap": "nmap", "host": "host", "dig": "bind9-dnsutils", "whois": "whois"}
+SYSTEM_DEPS_COMMON = {"nmap": "nmap", "host": "host", "dig": "bind9-dnsutils", "whois": "whois", "traceroute": "traceroute", "aircrack-ng": "aircrack-ng"}
 SYSTEM_DEPS_BY_MGR = {
     "apt": {"host": "dnsutils", "dig": "dnsutils", "whois": "whois"},
     "dnf": {"host": "bind-utils", "dig": "bind-utils", "whois": "whois"},
@@ -216,12 +216,18 @@ def _sysmanager():
     return None
 
 
-def _install_missing():
+def _install_missing_pip():
+    pip_extra = ""
     mgr = _sysmanager()
-    pip_extra = " --break-system-packages" if mgr and os.path.exists("/etc/os-release") and any(x in open("/etc/os-release").read() for x in ("Ubuntu", "Debian")) else ""
+    if mgr and os.path.exists("/etc/os-release") and any(x in open("/etc/os-release").read() for x in ("Ubuntu", "Debian")):
+        pip_extra = " --break-system-packages"
     for pkg in MISSING_PIPS:
         print(f"  {c(f'Installing {pkg}...', YELLOW)}")
         subprocess.run(f"{sys.executable} -m pip install {pkg}{pip_extra}", shell=True)
+
+
+def _install_missing_sys():
+    mgr = _sysmanager()
     for cmd, pkg in MISSING_SYSTEM:
         alt = SYSTEM_DEPS_BY_MGR.get(mgr, {}).get(cmd, pkg) if mgr else pkg
         print(f"  {c(f'Installing {alt}...', YELLOW)}")
@@ -254,51 +260,47 @@ def _ensure_mineflayer():
 def ensure_deps():
     print()
     print(f"{CYAN}{BOLD}{SYM_TL}{SYM_H*50}{SYM_TR}{RESET}")
-    s = spin("Checking dependencies")
+    s = spin("Checking Python dependencies")
     _check_pip_deps()
+    s.set()
+    sys.stdout.write(f"\r  {c(SYM_CHECK, GREEN)}  Python deps checked{' ' * 30}\n")
+    sys.stdout.flush()
+    time.sleep(0.1)
+    if MISSING_PIPS:
+        print(f"  {YELLOW}{SYM_WARN}  Missing Python: {', '.join(MISSING_PIPS)}{RESET}")
+        s2 = spin("Installing Python packages")
+        _install_missing_pip()
+        s2.set()
+        sys.stdout.write(f"\r  {c(SYM_CHECK, GREEN)}  Python install complete{' ' * 30}\n")
+        sys.stdout.flush()
+        MISSING_PIPS.clear()
+        _check_pip_deps()
+        if MISSING_PIPS:
+            print(f"\n  {RED}{SYM_X}  Some Python deps still missing. Install manually.{RESET}")
+    s = spin("Checking system tools")
     _check_system_deps()
     s.set()
-    sys.stdout.write(f"\r  {c(SYM_CHECK, GREEN)}  Dependencies checked{' ' * 30}\n")
+    sys.stdout.write(f"\r  {c(SYM_CHECK, GREEN)}  System tools checked{' ' * 30}\n")
     sys.stdout.flush()
-    time.sleep(0.15)
-    if MISSING_PIPS or MISSING_SYSTEM:
-        if MISSING_PIPS:
-            print(f"  {YELLOW}{SYM_WARN}  Missing Python: {', '.join(MISSING_PIPS)}{RESET}")
-        if MISSING_SYSTEM:
-            print(f"  {YELLOW}{SYM_WARN}  Missing system: {', '.join(p for _, p in MISSING_SYSTEM)}{RESET}")
-        s2 = spin("Installing missing dependencies")
-        _install_missing()
-        s2.set()
-        sys.stdout.write(f"\r  {c(SYM_CHECK, GREEN)}  Installation complete{' ' * 30}\n")
-        sys.stdout.flush()
-        time.sleep(0.1)
-        MISSING_PIPS.clear()
-        MISSING_SYSTEM.clear()
-        _check_pip_deps()
-        _check_system_deps()
-        if MISSING_PIPS or MISSING_SYSTEM:
-            print(f"\n  {RED}{SYM_X}  Some deps still missing.{RESET}")
-            if not _is_root():
-                print(f"  {YELLOW}Try running as root/Administrator to install system packages.{RESET}")
-            if input(f"\n  {CYAN}Retry install? (yes/no) {SYM_PROMPT} {RESET}").strip().lower() == "yes":
-                s3 = spin("Retrying installation")
-                _install_missing()
-                s3.set()
-                sys.stdout.write(f"\r  {c('Retry complete', YELLOW)}{' ' * 35}\n")
-                sys.stdout.flush()
-                MISSING_PIPS.clear()
-                MISSING_SYSTEM.clear()
-                _check_pip_deps()
-                _check_system_deps()
-                if MISSING_PIPS or MISSING_SYSTEM:
-                    print(f"\n  {RED}{SYM_X}  Still missing deps. Install manually and re-run.{RESET}")
-                    sys.exit(1)
-                else:
-                    print(f"  {GREEN}{SYM_CHECK}  All deps satisfied!{RESET}")
+    time.sleep(0.1)
+    if MISSING_SYSTEM:
+        print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(p for _, p in MISSING_SYSTEM)}{RESET}")
+        ans = input(f"\n  {CYAN}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+        if ans == "y":
+            s2 = spin("Installing system tools")
+            _install_missing_sys()
+            s2.set()
+            sys.stdout.write(f"\r  {c(SYM_CHECK, GREEN)}  System install complete{' ' * 30}\n")
+            sys.stdout.flush()
+            MISSING_SYSTEM.clear()
+            _check_system_deps()
+            if MISSING_SYSTEM:
+                print(f"\n  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
             else:
-                print(f"  {RED}Install manually and re-run.{RESET}")
-                sys.exit(1)
-    else:
+                print(f"  {GREEN}{SYM_CHECK}  System tools satisfied!{RESET}")
+        else:
+            print(f"  {YELLOW}Skipping system tools. Some features may be limited.{RESET}")
+    elif not MISSING_PIPS:
         print(f"  {GREEN}{SYM_CHECK}  All deps found!{RESET}")
     _ensure_mineflayer()
 
