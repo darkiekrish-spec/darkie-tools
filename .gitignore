@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.pyo
+~/.darkie_reports/
+.env
+*.encrypted
+*.decrypted
+.integrity_baseline.json

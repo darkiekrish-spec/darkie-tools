@@ -1,0 +1,19 @@
+{
+  "name": "darkie-security-suite",
+  "version": "3.0.0",
+  "description": "Darkie Security Suite - Advanced Cybersecurity Toolkit with Mineflayer Integration",
+  "main": "mc_bots.js",
+  "scripts": {
+    "bots": "node mc_bots.js",
+    "setup": "npm install",
+    "test": "echo \"Run: python3 ../v2.1/tool.py\""
+  },
+  "keywords": ["cybersecurity", "pentesting", "osint", "mineflayer", "minecraft"],
+  "author": "Darkie Tester",
+  "license": "MIT",
+  "dependencies": {
+    "mineflayer": "^4.37.1",
+    "prismarine-chunk": "^1.33.0",
+    "prismarine-world": "^3.7.0"
+  }
+}

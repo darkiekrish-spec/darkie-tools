@@ -979,7 +979,7 @@ def osint_email():
                 resp = sock.recv(256).decode('utf-8', errors='ignore')
                 sock.sendall(f"VRFY {email}\r\n".encode())
                 vrfy_resp = sock.recv(256).decode('utf-8', errors='ignore')
-                sock.sendall(b"RCPT TO:<{}>\r\n".format(email).encode())
+                sock.sendall(f"RCPT TO:<{email}>\r\n".encode())
                 rcpt_resp = sock.recv(256).decode('utf-8', errors='ignore')
                 sock.sendall(b"QUIT\r\n")
                 sock.close()
@@ -1025,15 +1025,17 @@ def osint_email():
     except Exception:
         pass
 
-    # ── Breach check (public API) ──
+    # ── Breach check (HIBP v3 - requires API key) ──
     breach_count = 0
-    try:
-        r = requests.get(f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}",
-                        timeout=10, headers={"hibp-api-key": ""})
-        if r.status_code == 200:
-            breach_count = len(r.json())
-    except Exception:
-        pass
+    hibp_key = os.environ.get("HIBP_API_KEY", "")
+    if hibp_key:
+        try:
+            r = requests.get(f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}",
+                            timeout=10, headers={"hibp-api-key": hibp_key, "user-agent": "DarkieSecurity"})
+            if r.status_code == 200:
+                breach_count = len(r.json())
+        except Exception:
+            pass
 
     info_lines = [
         f"  Email:        {c(email, Fore.GREEN)}",
