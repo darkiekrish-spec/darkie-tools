@@ -224,19 +224,27 @@ def _ensure_pip_installed():
         return True
     except ImportError:
         pass
-    _, pkg_mgr = _detect_os()
+    try:
+        import ensurepip
+        print(f"  {YELLOW}Pip not found. Bootstrapping via ensurepip...{RESET}")
+        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        importlib.import_module("pip")
+        return True
+    except Exception:
+        pass
+    os_name, pkg_mgr = _detect_os()
     pip_pkg_map = {
         "apt": "python3-pip",
         "dnf": "python3-pip",
         "pacman": "python-pip",
         "apk": "py3-pip",
         "zypper": "python3-pip",
-        "brew": "python-pip",
-        "choco": "python3-pip",
     }
     pkg = pip_pkg_map.get(pkg_mgr)
     if not pkg:
-        print(f"  {RED}{SYM_X}  Don't know how to install pip on this system.{RESET}")
+        print(f"  {RED}{SYM_X}  Don't know how to install pip on {os_name}/{pkg_mgr}.{RESET}")
+        print(f"  {YELLOW}Try: python3 -m ensurepip --upgrade  or install pip manually.{RESET}")
         return False
     print(f"  {YELLOW}Pip not found. Installing {pkg} via {pkg_mgr}...{RESET}")
     info = PKG_MANAGERS.get(pkg_mgr)
