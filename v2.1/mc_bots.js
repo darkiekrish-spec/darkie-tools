@@ -40,7 +40,7 @@ function createBot(index) {
       port: port,
       username: username,
       auth: 'offline',
-      hideErrors: true,
+      hideErrors: false,
     };
     if (version) opts.version = version;
 
@@ -91,16 +91,21 @@ function createBot(index) {
   }
 }
 
-// stagger connections
-const stagger = 1000 / Math.max(count / duration, 1);
+// stagger connections — connect quickly, not spread across duration
+const stagger = Math.max(50, Math.min(200, 1000 / count));
 for (let i = 0; i < count; i++) {
   setTimeout(() => createBot(i), i * stagger);
 }
 
 // status reporting
+let last_report = '';
 const interval = setInterval(() => {
   const elapsed = ((Date.now() - start) / 1000).toFixed(0);
-  process.stdout.write(`\r  [MC] ${connected} connected | ${failed} failed | ${disconnected} left | ${elapsed}s/${duration}s  `);
+  const report = `  [MC] ${connected} connected | ${failed} failed | ${disconnected} left | ${elapsed}s/${duration}s`;
+  if (report !== last_report) {
+    console.log(report);
+    last_report = report;
+  }
 }, 1000);
 
 setTimeout(() => {

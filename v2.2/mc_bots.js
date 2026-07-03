@@ -1,4 +1,8 @@
 const mineflayer = require('mineflayer');
+process.on('uncaughtException', (err) => {
+  if (err.code === 'EPIPE') return;
+  console.error(err);
+});
 
 const host = process.argv[2] || 'localhost';
 const port = parseInt(process.argv[3]) || 25565;
@@ -25,12 +29,9 @@ function randomUsername() {
 
 let connected = 0;
 let failed = 0;
-let disconnected = 0;
-let botCount = 0;
+let finished = 0;
 const start = Date.now();
-const bots = [];
-const MAX_RETRIES = 2;
-
+const bots = new Map();
 function createBot(index) {
   const username = randomUsername();
   const attempt = arguments[1] || 0;
@@ -40,20 +41,38 @@ function createBot(index) {
       port: port,
       username: username,
       auth: 'offline',
-      hideErrors: true,
     };
     if (version) opts.version = version;
 
     const bot = mineflayer.createBot(opts);
     bot._darkie_idx = index;
     bot._darkie_attempt = attempt;
-    bots.push(bot);
+    bot._darkie_connected = false;
+    bot._darkie_done = false;
+    bots.set(index, bot);
+
+    const connTimeout = setTimeout(() => {
+      if (!bot._darkie_connected) {
+        bot._darkie_done = true;
+        try { bot.end(); } catch(e) {}
+        setTimeout(() => createBot(index, attempt + 1), 2000);
+      }
+    }, 10000);
 
     bot.on('login', () => {
+      bot._darkie_connected = true;
+      clearTimeout(connTimeout);
       connected++;
     });
 
+    const pwd = `bot${Math.floor(Math.random() * 100000)}`;
+
     bot.on('spawn', () => {
+      setTimeout(() => {
+        try {
+          bot.chat(`/register ${pwd} ${pwd}`);
+        } catch(e) {}
+      }, 2000);
       setTimeout(() => {
         try {
           bot.setControlState('forward', true);
@@ -63,19 +82,30 @@ function createBot(index) {
             setTimeout(() => bot.setControlState('jump', false), 500);
           }, 2000);
         } catch(e) {}
-      }, 1000);
+      }, 3000);
     });
 
     bot.on('error', (err) => {
-      if (attempt < MAX_RETRIES) {
+      clearTimeout(connTimeout);
+      if (!bot._darkie_done) {
+        bot._darkie_done = true;
         setTimeout(() => createBot(index, attempt + 1), 2000);
-      } else {
-        failed++;
       }
     });
 
     bot.on('end', (reason) => {
-      disconnected++;
+      clearTimeout(connTimeout);
+      if (bots.get(index) === bot) {
+        bots.delete(index);
+      }
+      if (!bot._darkie_done) {
+        bot._darkie_done = true;
+        if (bot._darkie_connected) {
+          finished++; // was connected, count as done
+        } else {
+          setTimeout(() => createBot(index, attempt + 1), 2000); // never connected, retry
+        }
+      }
     });
 
     setTimeout(() => {
@@ -83,24 +113,26 @@ function createBot(index) {
     }, duration * 1000);
 
   } catch(e) {
-    if (attempt < MAX_RETRIES) {
-      setTimeout(() => createBot(index, attempt + 1), 2000);
-    } else {
-      failed++;
-    }
+    setTimeout(() => createBot(index, attempt + 1), 2000);
   }
 }
 
-// stagger connections
-const stagger = 1000 / Math.max(count / duration, 1);
+// stagger connections — connect as fast as possible
+const stagger = Math.max(1, Math.min(50, 250 / count));
 for (let i = 0; i < count; i++) {
   setTimeout(() => createBot(i), i * stagger);
 }
 
 // status reporting
+let last_report = '';
 const interval = setInterval(() => {
   const elapsed = ((Date.now() - start) / 1000).toFixed(0);
-  process.stdout.write(`\r  [MC] ${connected} connected | ${failed} failed | ${disconnected} left | ${elapsed}s/${duration}s  `);
+  const remaining = count - finished;
+  const report = `  [MC] ${connected} connected | ${failed} failed | ${remaining} left | ${elapsed}s/${duration}s`;
+  if (report !== last_report) {
+    console.log(report);
+    last_report = report;
+  }
 }, 1000);
 
 setTimeout(() => {
@@ -108,12 +140,15 @@ setTimeout(() => {
   const elapsed = ((Date.now() - start) / 1000).toFixed(1);
   console.log(`\n  [MC] Done: ${connected} bots connected in ${elapsed}s`);
   bots.forEach(b => { try { b.end(); } catch(e) {} });
+  bots.clear();
   process.exit(0);
 }, (duration + 3) * 1000);
 
 process.on('SIGINT', () => {
   clearInterval(interval);
-  console.log(`\n  [MC] Interrupted: ${connected} bots`);
+  const remaining = count - finished;
+  console.log(`\n  [MC] Interrupted: ${connected} connected, ${remaining} remaining`);
   bots.forEach(b => { try { b.end(); } catch(e) {} });
+  bots.clear();
   process.exit(0);
 });

