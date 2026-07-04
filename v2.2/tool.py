@@ -15,15 +15,17 @@ import random
 import re
 import shutil
 import socket
+import sqlite3
 import ssl
 import string
 import struct
 import subprocess
 import sys
+import threading
 import time
 import warnings
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _CF_TimeoutError
 from datetime import datetime as dt
 from urllib.parse import urlparse
 
@@ -376,6 +378,9 @@ def c(string, color=Fore.GREEN):
     return f"{color}{Style.BRIGHT}{string}{Style.RESET_ALL}"
 
 
+def dim(string):
+    return f"{DIM}{string}{RESET}"
+
 def c_dim(string, color=Fore.GREEN):
     return f"{color}{Style.DIM}{string}{Style.RESET_ALL}"
 
@@ -622,7 +627,7 @@ def net_traffic_monitor():
                     try:
                         with open("/proc/net/dev") as f:
                             new_data = f.read()
-                        sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}  {c('(install psutil for per-interface stats)', Fore.DIM)}")
+                        sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}  {c('(install psutil for per-interface stats)', Fore.BLACK)}")
                     except Exception:
                         sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}")
                 else:
@@ -1689,7 +1694,7 @@ def pentest_sqli():
                     print(f"    {c(ind, Fore.YELLOW)}")
                 add_log_alert("HIGH", "Pentest SQLi", f"SQLi detected on {url}: {payload}")
             else:
-                print(f"  {c(SYM_CHECK, Fore.GREEN)} {c(f'{desc:30s}', Fore.GREEN)} {c('No obvious injection', Fore.DIM)}")
+                print(f"  {c(SYM_CHECK, Fore.GREEN)} {c(f'{desc:30s}', Fore.GREEN)} {dim('No obvious injection')}")
         except Exception as e:
             print(f"  {c(SYM_X, Fore.RED)} {c(f'{desc:30s}', Fore.RED)} Error: {e}")
     print()
@@ -1875,7 +1880,7 @@ def pentest_http_methods():
                 if method in ("PUT", "DELETE", "TRACE", "CONNECT"):
                     add_log_alert("WARN", "Pentest HTTP", f"Dangerous HTTP method enabled: {method} on {url}")
             else:
-                print(f"  {c(f'{method:8s}', Fore.GREEN)} {c(f'[{status}]', YELLOW)} {c('Disabled', Fore.DIM)}")
+                print(f"  {c(f'{method:8s}', Fore.GREEN)} {c(f'[{status}]', YELLOW)} {dim('Disabled')}")
         except Exception as e:
             print(f"  {c(f'{method:8s}', Fore.RED)} {c('Error:', Fore.RED)} {e}")
     print()
@@ -3029,20 +3034,53 @@ def mc_find_ports(ip, verbose=True):
     try:
         nmap_has = shutil.which("nmap")
         if nmap_has:
-            mc_str = ",".join(str(p) for p in MINECRAFT_PORTS)
-            r = subprocess.run(["nmap", "-T4", "-Pn", "-p", mc_str, ip], capture_output=True, text=True, timeout=60)
-            for line in r.stdout.splitlines():
-                m = re.match(r'^(\d+)/tcp\s+open', line)
-                if m:
-                    p = int(m.group(1))
+            if verbose:
+                print(f"  {c('Running full port scan via nmap -T4 -p- (streaming output)...', Fore.YELLOW)}")
+            proc = subprocess.Popen(
+                ["nmap", "-T4", "-Pn", "-p-", ip],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+            def _nmap_reader(results):
+                for line in iter(proc.stdout.readline, ''):
+                    line_s = line.rstrip()
+                    if not line_s: continue
+                    m = re.match(r'^(\d+)/tcp\s+open', line_s)
+                    if m:
+                        p = int(m.group(1))
+                        if len(results) <= 20:
+                            print(f"    {line_s}")
+                        elif len(results) == 21:
+                            print(f"    {DIM}... ({c('firewall? all ports show open', Fore.RED)}){RESET}")
+                        if len(results) <= 1000:
+                            results.append(p)
+                    else:
+                        print(f"    {line_s}")
+            open_nmap = []
+            rt = threading.Thread(target=_nmap_reader, args=(open_nmap,), daemon=True)
+            rt.start()
+            proc.wait(timeout=600)
+            rt.join(timeout=5)
+            if len(open_nmap) > 1000:
+                if verbose:
+                    print(f"  {c(SYM_WARN + f' {len(open_nmap)} ports reported open — firewall false positive, ignoring.', Fore.RED)}")
+            else:
+                for p in open_nmap:
                     if p not in open_ports:
                         open_ports.append(p)
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print(f"  {c('nmap full scan timed out. Killing...', Fore.RED)}")
+        proc.kill()
+        proc.wait()
     except Exception:
         pass
 
     open_ports.sort()
     if verbose and open_ports:
-        print(f"  {c('Open MC ports:', Fore.GREEN)} {c(str(open_ports), Fore.CYAN)}")
+        if len(open_ports) <= 30:
+            print(f"  {c('Open ports:', Fore.GREEN)} {c(str(open_ports), Fore.CYAN)}")
+        else:
+            print(f"  {c(f'Open ports ({len(open_ports)}):', Fore.GREEN)} {c(str(open_ports[:20]), Fore.CYAN)}{DIM}...{RESET}")
     elif verbose:
         print(f"  {c('No MC ports detected. Try entering the port manually.', Fore.YELLOW)}")
     return open_ports
@@ -3402,13 +3440,12 @@ def stress_minecraft():
             print(f"  {c(f'Using manual IP: {ip}', Fore.GREEN)}")
         else:
             print(f"  {c('Auto-scanning for real origin IP...', Fore.YELLOW)}")
-            from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _TimeoutError
             real_ips = []
             with ThreadPoolExecutor(max_workers=1) as ex:
                 fut = ex.submit(cf_bypass, target, False)
                 try:
                     real_ips = fut.result(timeout=60)
-                except _TimeoutError:
+                except _CF_TimeoutError:
                     print(f"  {c('Scan timed out.', Fore.RED)}")
             if real_ips:
                 ip = real_ips[0]
@@ -3498,7 +3535,6 @@ def stress_minecraft():
                         if line:
                             sys.stdout.write(f"\r  {c('[Bot]', Fore.MAGENTA)} {line.strip()}{' '*40}\n")
                             sys.stdout.flush()
-                import threading
                 t = threading.Thread(target=_bot_reader, daemon=True)
                 t.start()
             except FileNotFoundError:
@@ -3517,7 +3553,6 @@ def stress_minecraft():
                     for f in as_completed(fs):
                         try: f.result()
                         except Exception: pass
-            import threading
             t = threading.Thread(target=_run_bots, daemon=True)
             t.start()
 
@@ -3525,58 +3560,56 @@ def stress_minecraft():
     if flood_enabled:
         udp_port = 19132
         def _run_flood(worker_func, workers, label, use_port, mode="rapid"):
-            _stop = threading.Event()
             _start = time.time()
             _sent = [0]
             _errs = [0]
             br = {}
-            actual_workers = workers
+            actual_workers = min(workers, 5000)
+            if workers > 5000:
+                print(f"  {YELLOW}Capping concurrent connections to 5000 (OS limit). Your input: {workers}{RESET}")
 
-            def _progress():
-                while not _stop.is_set():
-                    elapsed = time.time() - _start
-                    total_s = 0; total_e = 0
-                    for v in br.values():
-                        if isinstance(v, tuple) and len(v) == 2:
-                            total_s += v[0]; total_e += v[1]
-                    rate = total_s / elapsed if elapsed > 0 else 0
-                    bar_len = 30
-                    pct = min(elapsed / dur, 1.0) if dur > 0 else 1
-                    filled = int(bar_len * pct)
-                    bar = f"{GREEN}{'█'*filled}{DIM}{'░'*(bar_len-filled)}{RESET}"
-                    sys.stdout.write(f"\r  {CYAN}{label}{RESET} [{bar}] "
-                                     f"{GREEN}S:{total_s:,}{RESET} "
-                                     f"{RED}E:{total_e:,}{RESET} "
-                                     f"{MAGENTA}{rate:,.0f}/s{RESET} "
-                                     f"{YELLOW}{elapsed:.0f}s/{dur}s{RESET}  "
-                                     f"{DIM}Ctrl+C stop{RESET}{' '*20}")
-                    sys.stdout.flush()
-                    _stop.wait(0.3)
+            def _show_progress(elapsed, total_s, total_e):
+                rate = total_s / elapsed if elapsed > 0 else 0
+                bar_len = 30
+                pct = min(elapsed / dur, 1.0) if dur > 0 else 1
+                filled = int(bar_len * pct)
+                bar = f"{GREEN}{'█'*filled}{DIM}{'░'*(bar_len-filled)}{RESET}"
+                sys.stdout.write(f"\r  {CYAN}{label}{RESET} [{bar}] "
+                                 f"{GREEN}S:{total_s:,}{RESET} "
+                                 f"{RED}E:{total_e:,}{RESET} "
+                                 f"{MAGENTA}{rate:,.0f}/s{RESET} "
+                                 f"{YELLOW}{elapsed:.0f}s/{dur}s{RESET}  "
+                                 f"{DIM}Ctrl+C stop{RESET}{' '*20}")
+                sys.stdout.flush()
 
-            pt = threading.Thread(target=_progress, daemon=True)
-            pt.start()
-
+            _last_progress = 0
             ex = ThreadPoolExecutor(max_workers=actual_workers)
             fs = {ex.submit(worker_func, ip, use_port, dur, br, i, mode): i for i in range(actual_workers)}
             try:
                 for f in as_completed(fs):
-                    if _stop.is_set():
-                        break
                     try:
                         r = f.result()
                         if isinstance(r, tuple) and len(r) == 2:
                             _sent[0] += r[0]; _errs[0] += r[1]
                     except Exception:
                         pass
+                    elapsed = time.time() - _start
+                    if elapsed - _last_progress >= 0.3:
+                        total_s = sum(v[0] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+                        total_e = sum(v[1] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+                        _show_progress(elapsed, total_s, total_e)
+                        _last_progress = elapsed
             except KeyboardInterrupt:
-                _stop.set()
                 ex.shutdown(wait=False, cancel_futures=True)
+                print()
+                raise
             finally:
-                _stop.set()
                 ex.shutdown(wait=False, cancel_futures=True)
 
-            pt.join(timeout=2)
             el = time.time() - _start
+            total_s = sum(v[0] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+            total_e = sum(v[1] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+            _show_progress(el, total_s, total_e)
             rat = _sent[0] / el if el > 0 else 0
             print(f"\n  {GREEN}{SYM_CHECK} {label}: {c(f'S:{_sent[0]:,}', Fore.GREEN)} {c(f'E:{_errs[0]:,}', Fore.RED)} in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:,.0f}/s', Fore.MAGENTA)}){RESET}")
             return _sent[0]
@@ -5192,7 +5225,7 @@ def net_banner_grab():
             banner = s.recv(1024).decode(errors="replace").strip()
             s.close()
             if banner: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {c(banner[:80], Fore.CYAN)}")
-            else: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {c('no banner', Fore.DIM)}")
+            else: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {dim('no banner')}")
         except: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {c('closed', Fore.RED)}")
     print()
 
@@ -5633,7 +5666,7 @@ def cf_bypass(domain, verbose=True):
                             found_ips.append(("SUBNET", r, r))
                             _log(f"    {c(f'MOTD matches {domain}!', Fore.GREEN)}")
                         else:
-                            _log(f"    {c(f'MC @ {r}:25565 (unrelated)', Fore.DIM)}")
+                            _log(f"    {dim(f'MC @ {r}:25565 (unrelated)')}")
                     else:
                         mc_server_ips.add(r)
     _log(f"    {c(f'Scanned {len(scanned_subnets)} subnets, {scanned_ips_total} probes', Fore.GREEN)}")
@@ -5653,8 +5686,8 @@ def osint_censys():
     if not domain: return
 
     print(f"\n  {c(f'Scanning {domain} for origin IPs behind Cloudflare...', Fore.CYAN)}")
-    print(f"  {c('Uses DNS brute-force, MX/NS records, SSL certs, HTTP probes', Fore.DIM)}")
-    print(f"  {c('Zero external APIs — fully self-contained', Fore.DIM)}")
+    print(f"  {dim('Uses DNS brute-force, MX/NS records, SSL certs, HTTP probes')}")
+    print(f"  {dim('Zero external APIs — fully self-contained')}")
     print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
 
     ips = cf_bypass(domain, verbose=True)
@@ -5743,7 +5776,7 @@ def osint_github_dork():
                 name = item.get("full_name","?")
                 desc = (item.get("description") or "")[:50]
                 stars = item.get("stargazers_count",0)
-                print(f"    {c(name, Fore.GREEN):40s} {c(f'*{stars}', Fore.YELLOW)} {c(desc, Fore.DIM)}")
+                print(f"    {c(name, Fore.GREEN):40s} {c(f'*{stars}', Fore.YELLOW)} {dim(desc)}")
         else: print(f"  {RED}Error: {r.status_code}{RESET}")
     except: print(f"  {RED}Error.{RESET}")
     print()
@@ -5997,6 +6030,705 @@ def menu_adv_network():
         except Exception as e:
             print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
+def osint_recon_engine():
+    """Censys-style Internet Reconnaissance Engine — finds real IPs using Shodan InternetDB + active scanning + SQLite DB"""
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recon.db")
+    _init_db = lambda: sqlite3.connect(DB_PATH)
+    conn = _init_db()
+    conn.execute("CREATE TABLE IF NOT EXISTS hosts (ip TEXT PRIMARY KEY, hostname TEXT, domain TEXT, first REAL, last REAL, is_cf INT DEFAULT 0, is_origin INT DEFAULT 0, source TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS ports (ip TEXT, port INT, protocol TEXT DEFAULT 'tcp', service TEXT, banner TEXT, first REAL, last REAL, PRIMARY KEY(ip, port, protocol))")
+    conn.execute("CREATE TABLE IF NOT EXISTS scans (target TEXT, type TEXT, ports_found INT, ts REAL)")
+    conn.commit(); conn.close()
+    _now = lambda: time.time()
+
+    def _query_shodan(ip):
+        try:
+            r = requests.get(f"https://internetdb.shodan.io/{ip}", timeout=8)
+            if r.status_code == 200: return r.json()
+        except: pass
+        return None
+
+    def _scan_ports(ip, ports=None):
+        if ports is None: ports = [22, 80, 443, 8080, 8443, 25565, 25566, 19132, 3306, 5432, 6379, 27017, 21, 23, 25, 53, 110, 111, 139, 143, 445, 993, 995, 1433, 1521, 2049, 3389, 5900, 8443, 9000, 9090, 9200, 11211, 50070]
+        found = []
+        def _probe(p):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1.5)
+            try:
+                if s.connect_ex((ip, p)) == 0: found.append(p)
+            finally: s.close()
+        with ThreadPoolExecutor(max_workers=50) as ex:
+            for p in ports: ex.submit(_probe, p)
+        return found
+
+    def _grab_banner(ip, port):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(2); s.connect((ip, port))
+            if port in (80, 8080, 8000):
+                s.sendall(b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % ip.encode()); data = s.recv(1024)
+                for line in data.decode("utf-8", errors="replace").split("\r\n"):
+                    if "Server:" in line: s.close(); return line.strip()
+            elif port == 443:
+                try:
+                    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+                    ss = ctx.wrap_socket(s, server_hostname=ip); ss.settimeout(2); ss.sendall(b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % ip.encode())
+                    data = ss.recv(1024); ss.close()
+                    for line in data.decode("utf-8", errors="replace").split("\r\n"):
+                        if "Server:" in line: return line.strip()
+                except: pass
+            elif port in (25565, 25566):
+                resp = _mc_server_ping(ip, port, 2)
+                if resp: return str(resp.get("description", {}).get("text", ""))[:60]
+            s.close()
+            try: svc = socket.getservbyport(port); return svc
+            except: return "unknown"
+        except: return None
+
+    def _store_host(ip, hostname=None, domain=None, source="scan", is_cf=False, is_origin=False):
+        conn = _init_db(); ts = _now()
+        try:
+            conn.execute("INSERT OR IGNORE INTO hosts(ip,hostname,domain,first,last,is_cf,is_origin,source) VALUES(?,?,?,?,?,?,?,?)",
+                        (ip, hostname or "", domain or "", ts, ts, 1 if is_cf else 0, 1 if is_origin else 0, source))
+            conn.execute("UPDATE hosts SET last=?,hostname=COALESCE(NULLIF(?,''),hostname),domain=COALESCE(NULLIF(?,''),domain),source=? WHERE ip=?", (ts, hostname or "", domain or "", source, ip))
+        finally: conn.commit(); conn.close()
+
+    def _store_port(ip, port, service=None, banner=None):
+        conn = _init_db(); ts = _now()
+        try:
+            conn.execute("INSERT OR IGNORE INTO ports(ip,port,service,banner,first,last) VALUES(?,?,?,?,?,?)", (ip, port, service or "", banner or "", ts, ts))
+            conn.execute("UPDATE ports SET last=?,service=COALESCE(NULLIF(?,''),service),banner=COALESCE(NULLIF(?,''),banner) WHERE ip=? AND port=?", (ts, service or "", banner or "", ip, port))
+        finally: conn.commit(); conn.close()
+
+    def _fmt_time(ts):
+        return dt.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "never"
+
+    while True:
+        header_box("Internet Recon Engine", Fore.YELLOW)
+        conn = _init_db()
+        total_hosts = conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
+        total_ports = conn.execute("SELECT COUNT(*) FROM ports").fetchone()[0]
+        conn.close()
+        print(f"  {c(f'DB: {total_hosts} hosts, {total_ports} ports', Fore.CYAN)}")
+        print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+        print(f"  {c('[1]', Fore.GREEN)}  Query domain (DNS + crt.sh + Shodan)")
+        print(f"  {c('[2]', Fore.GREEN)}  Query IP (Shodan InternetDB)")
+        print(f"  {c('[3]', Fore.GREEN)}  Scan IP/range for open ports")
+        print(f"  {c('[4]', Fore.GREEN)}  Search database")
+        print(f"  {c('[5]', Fore.GREEN)}  Database stats")
+        print(f"  {c('[6]', Fore.GREEN)}  Continuous scan (crontab mode)")
+        print(f"  {c('[b]', Fore.CYAN)}   Back")
+        print()
+        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        if ch == "b": break
+
+        if ch == "1":
+            header_box("Domain Reconnaissance", Fore.YELLOW)
+            domain = input(f"  {c(f'Domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not domain: continue
+            print(f"  {c(f'Resolving {domain}...', Fore.CYAN)}")
+            found_ips = set()
+            try:
+                for info in socket.getaddrinfo(domain, 0):
+                    ip = info[4][0]
+                    if ip not in found_ips: found_ips.add(ip); print(f"    {c(ip, Fore.GREEN)} (DNS)");
+                    _store_host(ip, domain, domain, "dns")
+            except: print(f"  {RED}DNS resolution failed.{RESET}")
+            print(f"  {c('Querying crt.sh...', Fore.CYAN)}")
+            try:
+                text = _http_get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15)
+                if text:
+                    subs = set()
+                    for entry in json.loads(text):
+                        for name in entry.get("name_value", "").split("\n"):
+                            name = name.strip().lower()
+                            if name.endswith(f".{domain}") or name == domain: subs.add(name)
+                    def _dig_sub(sd):
+                        try:
+                            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", sd], capture_output=True, text=True, timeout=3)
+                            for line in r.stdout.strip().splitlines():
+                                ip = line.strip().rstrip(".")
+                                try: socket.inet_aton(ip); return (sd, ip)
+                                except: pass
+                        except: pass
+                        return None
+                    with ThreadPoolExecutor(max_workers=20) as ex:
+                        fs = {ex.submit(_dig_sub, s): s for s in list(subs)[:50]}
+                        for f in as_completed(fs):
+                            r = f.result()
+                            if r and r[1] not in found_ips:
+                                sd, ip = r; found_ips.add(ip)
+                                is_cf = any(ip.startswith(p) for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.", "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.", "197.234.", "198.41."])
+                                label = f"CF {sd}" if is_cf else f"   {sd}"
+                                color = Fore.RED if is_cf else Fore.GREEN
+                                print(f"    {c(label):30s} {c(ip, Fore.YELLOW)}")
+                                _store_host(ip, sd, domain, "crt.sh", is_cf, not is_cf)
+            except: pass
+            print(f"  {c(SYM_CHECK + f' Found {len(found_ips)} IPs', Fore.GREEN)}")
+            if found_ips:
+                non_cf = [ip for ip in found_ips if not any(ip.startswith(p) for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.", "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.", "197.234.", "198.41."])]
+                if non_cf:
+                    print(f"  {c('Candidate origin IPs:', Fore.GREEN)}")
+                    for ip in non_cf: print(f"    {c(ip, Fore.GREEN)}")
+                    r2 = input(f"  {c(f'Scan these origin candidates for open ports? (y/N) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+                    if r2 == "y":
+                        for ip in non_cf:
+                            print(f"  {c(f'Scanning {ip}...', Fore.CYAN)}")
+                            ports = _scan_ports(ip)
+                            for p in ports:
+                                svc = _grab_banner(ip, p)
+                                print(f"    {c(f'{p:5d}/tcp', Fore.GREEN)} {c(svc or '', Fore.CYAN)}")
+                                _store_port(ip, p, svc)
+                            _store_host(ip, domain=domain, source="scan")
+
+        elif ch == "2":
+            header_box("Shodan InternetDB Query", Fore.YELLOW)
+            ip = input(f"  {c(f'IP {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not ip: continue
+            try: socket.inet_aton(ip)
+            except: print(f"  {RED}Invalid IP.{RESET}"); continue
+            print(f"  {c('Querying Shodan InternetDB...', Fore.CYAN)}")
+            data = _query_shodan(ip)
+            if data:
+                ports = data.get("ports", []); hostnames = data.get("hostnames", []); vulns = data.get("vulns", [])
+                print(f"  Ports: {c(str(ports), Fore.GREEN)}")
+                print(f"  Hostnames: {c(str(hostnames), Fore.CYAN)}")
+                if vulns: print(f"  Vulns: {c(str(vulns), Fore.RED)}")
+                _store_host(ip, hostnames[0] if hostnames else "", "shodan", is_origin=True)
+                for p in ports: _store_port(ip, p, "shodan", None)
+                r2 = input(f"  {c(f'Grab banners on open ports? (y/N) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+                if r2 == "y":
+                    for p in ports[:20]:
+                        svc = _grab_banner(ip, p)
+                        if svc: print(f"    {c(f'{p:5d}/tcp', Fore.GREEN)} {c(svc, Fore.CYAN)}")
+                        _store_port(ip, p, svc)
+                r3 = input(f"  {c(f'Scan neighbor /24 subnet? (y/N) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+                if r3 == "y":
+                    parts = ip.split("."); base = f"{parts[0]}.{parts[1]}.{parts[2]}"
+                    print(f"  {c(f'Scanning {base}.0/24 on common ports...', Fore.CYAN)}")
+                    def _scan_one(ip2):
+                        data2 = _query_shodan(ip2)
+                        if data2:
+                            pts = data2.get("ports", [])
+                            if pts:
+                                _store_host(ip2, domain=base, source="shodan-subnet")
+                                for p2 in pts: _store_port(ip2, p2, "shodan")
+                                return (ip2, pts)
+                        return None
+                    with ThreadPoolExecutor(max_workers=50) as ex:
+                        fs = {ex.submit(_scan_one, f"{base}.{i}"): i for i in range(1, 255)}
+                        for f in as_completed(fs):
+                            r = f.result()
+                            if r: print(f"    {c(r[0], Fore.GREEN):16s} ports: {c(str(r[1]), Fore.CYAN)}")
+            else:
+                print(f"  {YELLOW}No data from Shodan. Try a manual scan.{RESET}")
+                _store_host(ip, source="manual")
+
+        elif ch == "3":
+            header_box("Port Scanner", Fore.YELLOW)
+            target = input(f"  {c(f'Target IP or CIDR (e.g. 1.2.3.4 or 1.2.3.0/24) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not target: continue
+            nmap_has = shutil.which("nmap")
+            if nmap_has:
+                print(f"  {c('Using nmap (fast) — Ctrl+C to skip any slow part...', Fore.CYAN)}")
+                try:
+                    r = subprocess.run(["nmap", "-T4", "-Pn", "-p", "22,80,443,8080,8443,25565,25566,19132,3306,5432,6379,27017,21,23,25,53,110,111,139,143,445,993,995,1433,1521,2049,3389,5900,8443,9000,9090,9200,11211,50070,2022,2222,8000,8888,3000,5000,8443,9090,10000", target],
+                                       capture_output=True, text=True, timeout=120)
+                    nmap_ports = []
+                    for line in r.stdout.splitlines():
+                        m = re.match(r'^(\d+)/tcp\s+open', line)
+                        if m and int(m.group(1)) not in nmap_ports: nmap_ports.append(int(m.group(1)))
+                        ip_m = re.match(r'Nmap scan report for ([\d.]+)', line)
+                        if ip_m: print(f"  {c(f'Scanning {ip_m.group(1)}...', Fore.CYAN)}")
+                    if nmap_ports:
+                        print(f"  {c(f'Open ports: {nmap_ports}', Fore.GREEN)}")
+                        for p in nmap_ports:
+                            svc = _grab_banner(target, p)
+                            _store_port(target, p, svc)
+                except subprocess.TimeoutExpired:
+                    print(f"  {YELLOW}nmap timed out.{RESET}")
+            else:
+                print(f"  {c('Using Python socket scanner...', Fore.CYAN)}")
+                ips = []
+                if "/" in target:
+                    import ipaddress
+                    for ip in ipaddress.IPv4Network(target, strict=False): ips.append(str(ip))
+                else: ips = [target]
+                for ip in ips[:256]:
+                    ports = _scan_ports(ip)
+                    if ports:
+                        print(f"  {c(ip, Fore.GREEN):16s} ports: {c(str(ports), Fore.CYAN)}")
+                        _store_host(ip, source="scan")
+                        for p in ports:
+                            svc = _grab_banner(ip, p)
+                            _store_port(ip, p, svc)
+
+        elif ch == "4":
+            header_box("Database Search", Fore.YELLOW)
+            q = input(f"  {c(f'Search (IP, port, domain, service) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not q: continue
+            conn = _init_db()
+            try:
+                rows = conn.execute("SELECT * FROM hosts WHERE ip LIKE ? OR domain LIKE ?", (f"%{q}%", f"%{q}%")).fetchall()
+                if rows:
+                    print(f"  {c(f'Hosts ({len(rows)}):', Fore.GREEN)}")
+                    for r in rows: print(f"    {c(r[0], Fore.GREEN):16s} {c(r[2], Fore.CYAN):30s} first:{_fmt_time(r[3])} {c('[origin]' if r[6] else '', Fore.GREEN)}")
+                qn = int(q) if q.isdigit() else None
+                if qn:
+                    rows2 = conn.execute("SELECT DISTINCT h.ip, h.domain, p.port, p.service FROM hosts h JOIN ports p ON h.ip=p.ip WHERE p.port=?", (qn,)).fetchall()
+                    if rows2:
+                        print(f"  {c(f'Hosts with port {qn} ({len(rows2)}):', Fore.GREEN)}")
+                        for r in rows2: print(f"    {c(r[0], Fore.GREEN):16s} port={c(str(r[2]), Fore.CYAN)} {c(r[3], Fore.YELLOW)}")
+                rows3 = conn.execute("SELECT * FROM ports WHERE service LIKE ? OR banner LIKE ?", (f"%{q}%", f"%{q}%")).fetchall()
+                if rows3:
+                    print(f"  {c(f'Ports ({len(rows3)}):', Fore.GREEN)}")
+                    for r in rows3: print(f"    {c(r[0], Fore.GREEN):16s} {c(f'{r[1]:5d}/{r[2]}', Fore.CYAN)} {c(r[3], Fore.YELLOW)}")
+                if not rows and not rows3: print(f"  {YELLOW}No results.{RESET}")
+            finally: conn.close()
+
+        elif ch == "5":
+            conn = _init_db()
+            h_total = conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
+            p_total = conn.execute("SELECT COUNT(*) FROM ports").fetchone()[0]
+            origins = conn.execute("SELECT COUNT(*) FROM hosts WHERE is_origin=1").fetchone()[0]
+            cf = conn.execute("SELECT COUNT(*) FROM hosts WHERE is_cf=1").fetchone()[0]
+            top_ports = conn.execute("SELECT port, COUNT(*) as cnt FROM ports GROUP BY port ORDER BY cnt DESC LIMIT 15").fetchall()
+            top_services = conn.execute("SELECT service, COUNT(*) as cnt FROM ports WHERE service!='' GROUP BY service ORDER BY cnt DESC LIMIT 15").fetchall()
+            last_scans = conn.execute("SELECT target, type, ports_found, ts FROM scans ORDER BY ts DESC LIMIT 5").fetchall()
+            conn.close()
+            info_box("DB Statistics", [
+                f"Total hosts: {h_total}",
+                f"Origin candidates: {origins}",
+                f"Cloudflare IPs: {cf}",
+                f"Total ports: {p_total}",
+                f"Top ports: {', '.join(f'{p}({c})' for p,c in top_ports[:8])}",
+                f"Top services: {', '.join(f'{s}({c})' for s,c in top_services[:5])}",
+                f"Recent scans: {len(last_scans)}",
+            ], Fore.YELLOW)
+
+        elif ch == "6":
+            header_box("Continuous Scan Mode", Fore.YELLOW)
+            print(f"  {c('This will continuously scan discovered IPs on a timer.', Fore.CYAN)}")
+            print(f"  {c('Useful for monitoring infrastructure changes.', Fore.CYAN)}")
+            duration = input(f"  {c(f'Run for how many minutes? (0=cancel) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not duration.isdigit() or int(duration) == 0: continue
+            dur_m = int(duration)
+            interval = input(f"  {c(f'Rescan interval in seconds (default 300) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            interval = int(interval) if interval.isdigit() else 300
+            end = _now() + dur_m * 60
+            print(f"  {c(f'Monitoring for {dur_m} minutes, rescanning every {interval}s...', Fore.GREEN)}")
+            print(f"  {c('Press Ctrl+C to stop early.', Fore.YELLOW)}")
+            try:
+                while _now() < end:
+                    conn = _init_db()
+                    ips = [r[0] for r in conn.execute("SELECT DISTINCT ip FROM hosts WHERE is_cf=0 ORDER BY last ASC").fetchall()]
+                    conn.close()
+                    for ip in ips[:20]:
+                        print(f"  {c(f'Rescanning {ip}...', Fore.CYAN)}", end=" ")
+                        sys.stdout.flush()
+                        ports = _scan_ports(ip)
+                        if ports:
+                            print(f"{c(f'found {len(ports)} ports', Fore.GREEN)}")
+                            for p in ports:
+                                svc = _grab_banner(ip, p)
+                                _store_port(ip, p, svc)
+                        else: print(f"{dim('no new ports')}")
+                        _store_host(ip, source="rescan")
+                    conn = _init_db()
+                    conn.execute("INSERT INTO scans(target,type,ports_found,ts) VALUES(?,?,?,?)", ("batch", "rescan", 0, _now()))
+                    conn.commit(); conn.close()
+                    remaining = max(0, end - _now())
+                    if remaining > 0:
+                        print(f"  {dim(f'Waiting {interval}s before next cycle...')}")
+                        time.sleep(min(interval, remaining))
+            except KeyboardInterrupt:
+                print(f"\n  {YELLOW}Continuous scan stopped.{RESET}")
+
+    print()
+
+
+def osint_censys_search():
+    """Censys Search — no API key. Shows ALL hosts (CF + origin) + services + certs, exactly like Censys."""
+    header_box("Censys Search (No API Key)", Fore.YELLOW)
+    target = input(f"  {c(f'IP or domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if not target: return
+    is_ip = False
+    try: socket.inet_aton(target); is_ip = True
+    except: pass
+
+    start = time.time()
+    domain = target if not is_ip else None
+    CF_PREFIXES = ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                   "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                   "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                   "197.234.", "198.41."]
+    def _is_cf(ip): return any(ip.startswith(p) for p in CF_PREFIXES)
+    def _fetch(url, timeout=8):
+        try:
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+            return r.text if r.status_code == 200 else None
+        except: return None
+
+    # ── 1. Resolve DNS (gets CF IPs) ──
+    all_ips = set()
+    if is_ip:
+        all_ips.add(target)
+    else:
+        try:
+            for info in socket.getaddrinfo(target, 0):
+                ip = info[4][0]
+                if ":" not in ip: all_ips.add(ip)
+        except: pass
+
+    # ── 2. Find origin IPs ──
+    origin_ips = set()
+    if domain:
+        print(f"  {c('Finding origin IPs via CT logs + DNS brute-force...', Fore.CYAN)}")
+        try:
+            bypass_results = cf_bypass(domain, verbose=False)
+            for ip in bypass_results:
+                if ip not in all_ips and not _is_cf(ip):
+                    all_ips.add(ip); origin_ips.add(ip)
+            print(f"    {c(f'{len(bypass_results)} origin candidate(s)', Fore.GREEN)}")
+        except Exception as e:
+            print(f"    {c(f'cf_bypass failed: {e}', Fore.RED)}")
+
+        # Try passive DNS for both target domain and root domain
+        root_domain = ".".join(domain.split(".")[-2:]) if len(domain.split(".")) > 2 else domain
+        for pdns_domain in [domain, root_domain]:
+            # AlienVault OTX
+            print(f"  {c(f'OTX passive DNS ({pdns_domain})...', Fore.CYAN)}", end=" ")
+            try:
+                text = _fetch(f"https://otx.alienvault.com/api/v1/indicators/domain/{pdns_domain}/passive_dns", timeout=10)
+                if text:
+                    pdns = json.loads(text).get("passive_dns", [])
+                    found = 0
+                    for entry in pdns:
+                        ip = entry.get("address", "")
+                        try:
+                            socket.inet_aton(ip)
+                            if ip not in all_ips:
+                                all_ips.add(ip); found += 1
+                                if not _is_cf(ip): origin_ips.add(ip)
+                        except: pass
+                    print(f"{c(f'{found} new IPs', Fore.GREEN)}")
+                else:
+                    print(f"{c('empty', Fore.YELLOW)}")
+            except Exception as e:
+                print(f"{c(str(e)[:16], Fore.RED)}")
+
+            # Hackertarget
+            print(f"  {c(f'Hackertarget DNS ({pdns_domain})...', Fore.CYAN)}", end=" ")
+            try:
+                text = _fetch(f"https://api.hackertarget.com/hostsearch/?q={pdns_domain}")
+                if text:
+                    found = 0
+                    for line in text.strip().split("\n"):
+                        if "," in line:
+                            sub, ip = line.split(",", 1)
+                            ip = ip.strip()
+                            try:
+                                socket.inet_aton(ip)
+                                if ip not in all_ips:
+                                    all_ips.add(ip); found += 1
+                                    if not _is_cf(ip): origin_ips.add(ip)
+                            except: pass
+                    print(f"{c(f'{found} new IPs', Fore.GREEN)}")
+                else:
+                    print(f"{c('empty', Fore.YELLOW)}")
+            except Exception as e:
+                print(f"{c(str(e)[:16], Fore.RED)}")
+
+        # crt.sh (both domains)
+        for ct_domain in [domain, root_domain]:
+            print(f"  {c(f'crt.sh + dig ({ct_domain})...', Fore.CYAN)}", end=" ")
+            try:
+                text = _fetch(f"https://crt.sh/?q=%25.{ct_domain}&output=json", timeout=10)
+                if text:
+                    subs = set()
+                    for entry in json.loads(text):
+                        for name in entry.get("name_value", "").split("\n"):
+                            n = name.strip().lower()
+                            if n.endswith(f".{ct_domain}") or n == ct_domain: subs.add(n)
+                    found = 0
+                    with ThreadPoolExecutor(max_workers=30) as ex:
+                        def _dig(host):
+                            try:
+                                r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", host], capture_output=True, text=True, timeout=3)
+                                for line in r.stdout.strip().splitlines():
+                                    ip = line.strip().rstrip(".")
+                                    try: socket.inet_aton(ip); return ip
+                                    except: pass
+                            except: pass
+                            return None
+                        fs = {ex.submit(_dig, s): s for s in list(subs)[:80]}
+                        for f in as_completed(fs):
+                            ip = f.result()
+                            if ip and ip not in all_ips:
+                                all_ips.add(ip); found += 1
+                                if not _is_cf(ip): origin_ips.add(ip)
+                    print(f"{c(f'{found} new IPs', Fore.GREEN)}")
+                else:
+                    print(f"{c('empty', Fore.YELLOW)}")
+            except:
+                print(f"{c(SYM_X, Fore.RED)}")
+
+        # Try mc-status API — might reveal origin IP
+        print(f"  {c('Minecraft server status (mcsrvstat.us)...', Fore.CYAN)}", end=" ")
+        try:
+            text = _fetch(f"https://api.mcsrvstat.us/3/{domain}", timeout=10)
+            if text:
+                j = json.loads(text)
+                motd = " ".join(j.get("motd", {}).get("clean", []))
+                raw_ip = j.get("ip", "")
+                if isinstance(raw_ip, list):
+                    mcip = raw_ip[0] if raw_ip else ""
+                else:
+                    mcip = str(raw_ip).strip("[]")
+                if mcip and mcip not in all_ips:
+                    all_ips.add(mcip); origin_ips.add(mcip)
+                    print(f"{c(f'found {mcip}', Fore.GREEN)}")
+                else:
+                    pc = j.get("players", {}).get("online", 0)
+                    print(f"{c(f'ok ({pc} online)', Fore.GREEN)}")
+            else:
+                print(f"{c('unreachable', Fore.YELLOW)}")
+        except Exception as e:
+            print(f"{c(str(e)[:16], Fore.RED)}")
+
+    # ── 3. Subnet scan around any non-CF IPv4 for MC servers ──
+    non_cf_ips = [ip for ip in all_ips if not _is_cf(ip) and ":" not in ip]
+    if domain and non_cf_ips:
+        print(f"  {c('Scanning /24 subnets around origin candidates for MC servers...', Fore.CYAN)}")
+        scanned = set()
+        for base_ip in non_cf_ips:
+            parts = base_ip.split(".")
+            subnet = f"{parts[0]}.{parts[1]}.{parts[2]}"
+            if subnet in scanned: continue
+            scanned.add(subnet)
+            with ThreadPoolExecutor(max_workers=30) as ex:
+                def _check_scan(ip):
+                    for p in [25565, 25566]:
+                        try:
+                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1)
+                            r = s.connect_ex((ip, p)); s.close()
+                            if r == 0: return ip
+                        except: pass
+                    return None
+                futs = {ex.submit(_check_scan, f"{subnet}.{o}"): o for o in range(1, 256)}
+                for f in as_completed(futs):
+                    r = f.result()
+                    if r and r not in all_ips:
+                        all_ips.add(r)
+                        origin_ips.add(r)
+                        print(f"    {c(f'[!] MC server found: {r}', Fore.GREEN)}")
+
+    print(f"  {c('Total unique IPs found:', Fore.CYAN)} {c(len(all_ips), Fore.GREEN)}")
+
+    # ── 4. Collect data per IP (Shodan + Geo) ──
+    hosts = {}
+    for ip in sorted(all_ips):
+        hosts[ip] = {"ports": {}, "vulns": [], "hostnames": set(), "asn": {}, "cf": _is_cf(ip),
+                     "origin": ip in origin_ips}
+        data = _fetch(f"https://internetdb.shodan.io/{ip}")
+        if data:
+            try:
+                j = json.loads(data)
+                for h in j.get("hostnames", []): hosts[ip]["hostnames"].add(h)
+                for p in j.get("ports", []): hosts[ip]["ports"][p] = "?"
+                hosts[ip]["vulns"] = j.get("vulns", [])
+            except: pass
+        geo = _fetch(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,as,proxy,hosting")
+        if geo:
+            try:
+                d = json.loads(geo)
+                if d.get("status") == "success": hosts[ip]["asn"] = d
+            except: pass
+        try:
+            ptr = socket.gethostbyaddr(ip)[0]
+            hosts[ip]["hostnames"].add(ptr)
+        except: pass
+
+        # Probe common ports (supplements Shodan data)
+        if ":" not in ip:
+            for p in [22, 80, 443, 8080, 8443, 25565, 25566, 19132, 2022, 3306, 5432]:
+                if p in hosts[ip]["ports"]: continue
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1.5)
+                try:
+                    if s.connect_ex((ip, p)) == 0: hosts[ip]["ports"][p] = "?"
+                except: pass
+                finally: s.close()
+
+    # ── 4. Certificates from crt.sh ──
+    certs = []
+    if domain:
+        text = _fetch(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15)
+        if text:
+            seen = set()
+            try:
+                for entry in json.loads(text):
+                    name = entry.get("name_value", ""); issuer = entry.get("issuer_name", "")[:60]
+                    na = entry.get("not_after", "")[:10]; nb = entry.get("not_before", "")[:10]
+                    for n in name.split("\n"):
+                        n = n.strip().lower()
+                        if n.endswith(domain) and n not in seen:
+                            seen.add(n); certs.append((name, issuer, nb, na))
+            except: pass
+
+    elapsed = time.time() - start
+
+    # ══════════════════════════════════════════════════════════
+    #  DISPLAY
+    # ══════════════════════════════════════════════════════════
+    print(f"\n  {c('Search Results for', Fore.GREEN)} {c(domain or target, Fore.YELLOW)}")
+    print(f"  {c('─'*55, Fore.CYAN)}")
+    print(f"  {c('Hosts', Fore.GREEN)}:        {c(len(all_ips), Fore.CYAN)}")
+    print(f"  {c('Certificates', Fore.GREEN)}: {c(len(certs), Fore.CYAN)}")
+    print(f"  {c('Duration', Fore.GREEN)}:     {c(f'{elapsed:.2f}s', Fore.YELLOW)}")
+    print(f"  {c('─'*55, Fore.CYAN)}")
+
+    # ── Display each host ──
+    for ip in sorted(all_ips):
+        hd = hosts[ip]
+        hnames = list(hd["hostnames"])
+        ptr_name = hnames[0] if hnames else ""
+        asn = hd["asn"]
+        is_ipv6 = ":" in ip
+
+        display_ip = ip
+        if is_ipv6:
+            display_ip = ip
+
+        print(f"\n  {c(display_ip, Fore.GREEN)}")
+
+        if hd["cf"]:
+            print(f"    {c('CLOUDFLARE PROXY', Fore.RED)}")
+        if hd["origin"]:
+            print(f"    {c('ORIGIN SERVER', Fore.GREEN)}")
+        if is_ipv6:
+            print(f"    {c('IPv6', Fore.CYAN)}")
+
+        # Tags
+        tags = set()
+        for p in hd["ports"]:
+            if p in (22, 2022, 2222): tags.add("SSH")
+            if p in (80, 443, 8080, 8443): tags.add("HTTP")
+            if p in (25565, 25566, 19132): tags.add("MINECRAFT")
+        if tags:
+            print(f"    {c('  '.join(sorted(tags)), Fore.MAGENTA)}")
+
+        if ptr_name:
+            print(f"  {dim('PTR')}  {c(ptr_name, Fore.CYAN)}")
+
+        # OS hint (only for origin IPs to save time)
+        os_hint = ""
+        if hd["cf"]:
+            os_hint = "Unknown (Cloudflare proxy)"
+        elif hd["origin"]:
+            for p in hd["ports"]:
+                if p in (22, 2022, 2222):
+                    try:
+                        s = socket.socket(); s.settimeout(1.5); s.connect((ip, p))
+                        s.sendall(b"SSH-2.0-OpenSSH_xxx\r\n"); b = s.recv(64).decode(errors="replace"); s.close()
+                        if "OpenSSH" in b: os_hint = "Linux (Canonical)"; break
+                    except: pass
+        if os_hint:
+            print(f"  {dim('OS')}  {c(os_hint, Fore.CYAN)}")
+
+        # Network + Location
+        if asn:
+            as_str = asn.get("as", "?")
+            org = asn.get("org", "?").split(" - ")[0] if " - " in asn.get("org", "") else asn.get("org", "?")
+            loc = asn.get("city", "") or asn.get("regionName", "") or ""
+            country = asn.get("country", "")
+            loc_str = f"{loc}, {country}" if loc and country else country or loc
+            print(f"  {dim('AS')} {c(as_str, Fore.YELLOW)}  {c(org, Fore.CYAN)}")
+            if loc_str:
+                print(f"  {dim('Location')}  {c(loc_str, Fore.YELLOW)}")
+        elif hd["cf"]:
+            print(f"  {dim('AS')} {c('AS13335 Cloudflare, Inc.', Fore.YELLOW)}")
+            print(f"  {dim('Location')}  {c('Cloudflare (Anycast)', Fore.YELLOW)}")
+
+        # Services
+        if hd["ports"]:
+            print(f"\n  {c('Services', Fore.GREEN)} ({len(hd['ports'])})")
+            for p in sorted(hd["ports"]):
+                svc_name = "?"
+                try: svc_name = socket.getservbyport(p).upper()
+                except: svc_name = {22:"SSH",80:"HTTP",443:"HTTPS",8080:"HTTP",8443:"HTTPS",
+                                   25565:"MINECRAFT",25566:"MINECRAFT",19132:"MINECRAFT",
+                                   2022:"SSH",2222:"SSH",3306:"MYSQL",5432:"POSTGRES",
+                                   6379:"REDIS",27017:"MONGODB",3389:"RDP",5900:"VNC"}.get(p, "TCP")
+                print(f"    {c(f'{p:5d} / {svc_name}', Fore.GREEN)}")
+
+        # Software (only for origin + CF proxy IPs)
+        sw = set()
+        if hd["cf"] or hd["origin"]:
+            for p in hd["ports"]:
+                try:
+                    s = socket.socket(); s.settimeout(1.5); s.connect((ip, p))
+                    try:
+                        ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+                        ss = ctx.wrap_socket(s, server_hostname=ip); ss.settimeout(1.5)
+                        cert = ss.getpeercert()
+                        if cert:
+                            for sk, sv in cert.get("subject", []):
+                                if sk == "commonName" and sv: sw.add(f"SSL:{sv}"); break
+                        ss.close()
+                    except:
+                        try:
+                            s.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                            b = s.recv(256).decode(errors="replace")
+                            for line in b.split("\r\n"):
+                                if line.lower().startswith("server:"): sw.add(line.split(":", 1)[1].strip()); break
+                        except: pass
+                    finally:
+                        try: s.close()
+                        except: pass
+                except: pass
+        if sw:
+            print(f"\n  {c('Software', Fore.GREEN)} ({len(sw)})")
+            for s in sorted(sw): print(f"    {c(s, Fore.CYAN)}")
+
+        # Matched Fields (only for hosts that genuinely match)
+        match = hd["cf"] or hd["origin"] or (domain and any(domain in h for h in hnames))
+        if domain and match:
+            print(f"\n  {c('Matched Fields', Fore.GREEN)}")
+            print(f"    {dim('host.dns.forward_dns.key')}")
+            print(f"      {c(domain, Fore.YELLOW)}")
+            print(f"    {dim('host.dns.forward_dns.value.name')}")
+            print(f"      {c(domain, Fore.YELLOW)}")
+            print(f"    {dim('host.dns.names')}")
+            print(f"      {c(domain, Fore.YELLOW)}")
+
+    # ── Certificates ──
+    if certs:
+        print(f"\n  {c('─'*60, Fore.CYAN)}")
+        print(f"  {c('Certificates', Fore.GREEN)} ({len(certs)})")
+        seen_first = set()
+        for name, issuer, nb, na in certs[:5]:
+            first_name = name.split("\n")[0].strip().lower()
+            if first_name in seen_first: continue
+            seen_first.add(first_name)
+            trust = "expired" if na and na < dt.now().strftime("%Y-%m-%d") else "valid"
+            print(f"\n  {c(first_name, Fore.GREEN)}")
+            print(f"  {dim('Issuer')}:       {issuer}")
+            print(f"  {dim('Validity')}:     {nb or '?'} — {na or '?'}")
+            print(f"  {dim('Trust')}:        {c('Expired' if trust=='expired' else 'Trusted', Fore.RED if trust=='expired' else Fore.GREEN)}")
+            for n in sorted(set(n.strip().lower() for n in name.split("\n") if n.strip()))[:8]:
+                print(f"    {c(n, Fore.GREEN)}")
+
+    # ── Summary ──
+    cf_count = sum(1 for ip in all_ips if hosts.get(ip, {}).get("cf"))
+    origin_count = sum(1 for ip in all_ips if hosts.get(ip, {}).get("origin"))
+    print(f"\n  {c('─'*55, Fore.CYAN)}")
+    print(f"  {c('Summary:', Fore.GREEN)} {c(len(all_ips), Fore.CYAN)} IPs total "
+          f"({c(cf_count, Fore.RED)} CF, {c(origin_count, Fore.GREEN)} origin)")
+    if domain and origin_count == 0:
+        print(f"  {dim('Tip: No origin IPs found. Try searching by IP directly if you know it.')}")
+        print(f"  {dim('Tip: Check the Recon Engine (option 9) for continuous monitoring.')}")
+
+    print()
+
+
 def menu_adv_osint():
     while True:
         header_box("Advanced OSINT", Fore.YELLOW)
@@ -6008,13 +6740,15 @@ def menu_adv_osint():
         print(f"  {c('[6]', Fore.GREEN)}  GitHub Dork Search")
         print(f"  {c('[7]', Fore.GREEN)}  DNS History Check")
         print(f"  {c('[8]', Fore.GREEN)}  Wayback Machine Check")
+        print(f"  {c('[9]', Fore.GREEN)}  Internet Recon Engine (Censys-style)")
+        print(f"  {c('[10]', Fore.GREEN)} Censys Search (no API key)")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
         try:
             ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
             if ch == "b": break
             {"1":osint_shodan,"2":osint_censys,"3":osint_ct_log,"4":osint_btc_lookup,"5":osint_pastebin,
-             "6":osint_github_dork,"7":osint_dns_history,"8":osint_wayback}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+             "6":osint_github_dork,"7":osint_dns_history,"8":osint_wayback,"9":osint_recon_engine,"10":osint_censys_search}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
         except KeyboardInterrupt:
             break
         except Exception as e:

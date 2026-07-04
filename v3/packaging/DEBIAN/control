@@ -1,0 +1,10 @@
+Package: darkie-suite
+Version: 3.0.0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.8), python3-pip, python3-tk, python3-requests, python3-colorama
+Maintainer: Darkie Security <darkie@example.com>
+Description: Darkie Security Suite v3 — Advanced Cybersecurity & Network Defense Platform
+ Multi-module security toolkit including network monitoring, vulnerability scanning,
+ OSINT reconnaissance, penetration testing, SIEM, and stress testing.

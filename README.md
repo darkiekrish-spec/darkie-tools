@@ -2,25 +2,62 @@
 
 Advanced Cybersecurity & Network Defense Platform — 60+ tools across 16 modules.
 
+## Quick Start — Zero Dependencies
+
+**Linux / macOS:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v3/darkie.sh | bash
+```
+```bash
+wget -qO- https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v3/darkie.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v3/darkie.ps1'))
+```
+
+**npm:**
+```bash
+npm install -g darkie-tools
+darkie
+```
+
+The script auto-detects your OS and downloads the latest prebuilt binary from GitHub releases.
+
 ## Versions
 
 | Version | Directory | Description |
 |---------|-----------|-------------|
-| v1.0 | `stress_test.py` | Basic stress testing (Minecraft + Web) |
-| v1.2 | `v1.2/` | Added IP flood stress test |
+| **v3** | `v3/` | **Multi-OS standalone** — AppImage, .deb, .rpm, .exe. No Python needed. |
+| v2.2 | `v2.2/` | Refined v2 with full 16 modules and auto-dependency installer |
+| v2.1 | `v2.1/` | "GOAT Edition" — Mineflayer bots, 10 more modules, animated UI |
+| v2 | `v2/` | Modular refactor with 6 modules |
 | v1.3 | `v1.3/` | Added OSINT, telephone tools, network utilities, web recon |
-| v2 | `v2/` | Modular refactor with 6 modules (network threat, endpoint, vuln, data, pentest, SIEM) |
-| v2.1 | `v2.1/` | "GOAT Edition" — Added Mineflayer bots, 10 more modules, animated UI |
-| v2.2 | `v2.2/` | Latest — Refined v2 with full 16 modules and auto-dependency installer |
+| v1.2 | `v1.2/` | Added IP flood stress test |
+| v1.0 | `stress_test.py` | Basic stress testing (Minecraft + Web) |
 
-## Quick Start
+### v3 — Prebuilt Binaries
 
+| File | OS | Use |
+|------|----|-----|
+| `tool.AppImage` | Any Linux | `./tool.AppImage` |
+| `tool.deb` | Debian/Ubuntu | `sudo dpkg -i tool.deb` |
+| `tool.rpm` | Fedora/RHEL | `sudo rpm -ivh tool.rpm` |
+| `tool.exe` | Windows | `tool.exe` |
+| `tool.sh` | Linux/macOS | `./tool.sh` (local launcher) |
+| `tool.ps1` | Windows | `.\tool.ps1` (local launcher) |
+| `darkie.sh` | All (bash) | Universal curl\|bash installer |
+| `darkie.ps1` | Windows | Universal iex installer |
+
+### Run from Source (any OS)
 ```bash
-# Latest version (auto-installs dependencies)
-python3 v2.2/tool.py
-
-# Or v2.1 GOAT Edition
-python3 v2.1/tool.py
+git clone https://github.com/darkiekrish-spec/darkie-tools
+cd darkie-tools/v3
+pip install -r requirements.txt
+python3 tool.py                          # Terminal
+python3 gui/app.py                       # Desktop GUI
+python3 gui/web_app.py --host 0.0.0.0    # Web GUI
 ```
 
 ## Modules
@@ -37,7 +74,7 @@ python3 v2.1/tool.py
 | 8 | OSINT Reconnaissance | Phone lookup, email OSINT, IP geolocation, DNS enum, subdomain discovery, social username search, website recon, whois |
 | 9 | Telephone Tools | Number analysis, country codes, phone formatter |
 | 10 | Network Utilities | Port scanner, SSL/TLS checker, HTTP security headers, ping, traceroute |
-| 11 | Hash & Crypto Tools | Hash generator, hash identifier, hash cracker, encoder/decoder (Base64/URL/Hex/ROT13/Binary/Morse), password generator |
+| 11 | Hash & Crypto Tools | Hash generator, hash identifier, hash cracker, encoder/decoder, password generator |
 | 12 | System Security Audit | Rootkit detection, SUID/SGID scanner, cron job analyzer, file permissions audit, kernel hardening check |
 | 13 | Advanced Network | Port knocking tester, banner grabbing, reverse shell detector, MAC lookup, LAN discovery, DHCP scanner |
 | 14 | Advanced OSINT | Shodan search, certificate transparency, Bitcoin lookup, GitHub dorks, Wayback machine |
@@ -46,27 +83,10 @@ python3 v2.1/tool.py
 
 ## Requirements
 
-- **Python 3.10+**
+- **Python 3.10+** (for source run only — prebuilt binaries need nothing)
 - **Node.js 18+** (for Minecraft Mineflayer bots — v2.1+)
-- **Linux** (primary), macOS, Windows (limited)
-
-### Python packages (auto-installed)
-```
-colorama, requests, psutil, cryptography, netifaces,
-beautifulsoup4, lxml, dnspython, ipwhois, python-nmap
-```
-`scapy` is optional — auto-detected if installed, graceful fallback if not.
-
-### Node.js packages (auto-installed, v2.1+)
-```
-mineflayer, prismarine-chunk, prismarine-world
-```
-
-### System tools (auto-detected, prompted install)
-The tool checks for `nmap`, `host`, `dig`, `whois`, `traceroute`, `aircrack-ng`, `tcpdump`, and `iptables` on startup. If any are missing, you'll be prompted to install them automatically via your platform's package manager.
-
-Supported package managers: `apt` (Debian/Ubuntu/Kali), `dnf` (Fedora/RHEL), `pacman` (Arch), `apk` (Alpine), `zypper` (openSUSE), `brew` (macOS), `choco` (Windows).
+- Dependencies auto-installed on first run
 
 ## Legal Disclaimer
 
-For educational use only. You must own or have explicit permission to test any target system. Unauthorized access is illegal and punishable by law.
+For educational use only. You must own or have explicit permission to test any target system.

@@ -1,0 +1,5 @@
+#!/bin/bash
+DIR="$(dirname "$(readlink -f "$0")")"
+export PATH="$DIR/usr/bin:$PATH"
+cd "$DIR/usr/share/darkie-suite"
+python3 tool.py

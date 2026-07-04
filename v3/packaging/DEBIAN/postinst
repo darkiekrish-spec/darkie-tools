@@ -1,0 +1,7 @@
+#!/bin/bash
+set -e
+echo "Darkie Security Suite v3 installed."
+echo "Run: darkie-suite        (terminal)"
+echo "Run: darkie-suite-gui    (desktop GUI)"
+echo "Run: darkie-suite-web    (web GUI at http://localhost:5000)"
+pip3 install -r /usr/share/darkie-suite/requirements.txt 2>/dev/null || true
