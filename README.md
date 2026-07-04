@@ -23,13 +23,17 @@ npm install -g darkie-tools
 darkie
 ```
 
-The script auto-detects your OS and downloads the latest prebuilt binary from GitHub releases.
+All binaries are built with PyInstaller — Python + all deps bundled inside.
+No Python, pip, or any runtime required on the target system.
+
+**GUI by default** — Launches a desktop GUI (tkinter) with clickable buttons.
+On headless/VPS systems, automatically starts a web GUI at `http://0.0.0.0:5000`.
 
 ## Versions
 
 | Version | Directory | Description |
 |---------|-----------|-------------|
-| **v3** | `v3/` | **Multi-OS standalone** — AppImage, .deb, .rpm, .exe. No Python needed. |
+| **v3** | `v3/` | **Multi-OS standalone** — AppImage, .deb, .rpm, .exe. Zero deps. |
 | v2.2 | `v2.2/` | Refined v2 with full 16 modules and auto-dependency installer |
 | v2.1 | `v2.1/` | "GOAT Edition" — Mineflayer bots, 10 more modules, animated UI |
 | v2 | `v2/` | Modular refactor with 6 modules |
@@ -39,16 +43,17 @@ The script auto-detects your OS and downloads the latest prebuilt binary from Gi
 
 ### v3 — Prebuilt Binaries
 
-| File | OS | Use |
-|------|----|-----|
-| `tool.AppImage` | Any Linux | `./tool.AppImage` |
-| `tool.deb` | Debian/Ubuntu | `sudo dpkg -i tool.deb` |
-| `tool.rpm` | Fedora/RHEL | `sudo rpm -ivh tool.rpm` |
-| `tool.exe` | Windows | `tool.exe` |
-| `tool.sh` | Linux/macOS | `./tool.sh` (local launcher) |
-| `tool.ps1` | Windows | `.\tool.ps1` (local launcher) |
-| `darkie.sh` | All (bash) | Universal curl\|bash installer |
-| `darkie.ps1` | Windows | Universal iex installer |
+| File | OS | Size | Use |
+|------|----|------|-----|
+| `tool.AppImage` | Any Linux | 19MB | `./tool.AppImage` |
+| `tool.deb` | Debian/Ubuntu | 19MB | `sudo dpkg -i tool.deb` |
+| `tool.rpm` | Fedora/RHEL | 19MB | `sudo rpm -ivh tool.rpm` |
+| `tool.exe` | Windows | 19MB | `tool.exe` |
+| `tool` | Linux | 19MB | `./tool` |
+| `tool.sh` | Linux/macOS | — | Launcher — tries AppImage → binary |
+| `tool.ps1` | Windows | — | Runs `tool.exe` |
+| `darkie.sh` | All (bash) | — | Universal curl\|bash installer |
+| `darkie.ps1` | Windows | — | Universal iex installer |
 
 ### Run from Source (any OS)
 ```bash
