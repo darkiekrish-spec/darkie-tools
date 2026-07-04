@@ -266,7 +266,7 @@ def _install_missing():
     if MISSING_PIPS:
         if _ensure_pip_installed():
             print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-            pip_cmd = [sys.executable, "-m", "pip", "install"] + MISSING_PIPS
+            pip_cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS
             _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
         else:
             print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable).{RESET}")
@@ -295,7 +295,7 @@ def ensure_deps():
         print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
         if _ensure_pip_installed():
             print(f"  {CYAN}Auto-installing Python packages...{RESET}")
-            _run_as_admin([sys.executable, "-m", "pip", "install"] + MISSING_PIPS, "pip install missing packages")
+            _run_as_admin([sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS, "pip install missing packages")
             MISSING_PIPS = []
             _check_pip_deps()
             if MISSING_PIPS:
@@ -318,7 +318,10 @@ def ensure_deps():
             else:
                 print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
         else:
-            ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+            try:
+                ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+            except (EOFError, OSError):
+                ans = "n"
             if ans == "y":
                 _install_missing()
                 MISSING_SYSTEM = []
@@ -363,10 +366,10 @@ init(autoreset=True)
 
 BANNER_LINES = [
     " ____             _    _         _____ ___   ___  _     ____  ",
-    "|  _ \  __ _ _ __| | _(_) ___   |_   _/ _ \ / _ \| |   / ___| ",
-    "| | | |/ _` | '__| |/ / |/ _ \    | || | | | | | | |   \___ \ ",
-    "| |_| | (_| | |  |   <| |  __/    | || |_| | |_| | |___ ___) |",
-    "|____/ \__,_|_|  |_|\_\_|\___|    |_| \___/ \___/|_____|____/ ",
+    r"|  _ \  __ _ _ __| | _(_) ___   |_   _/ _ \ / _ \| |   / ___| ",
+    r"| | | |/ _` | '__| |/ / |/ _ \    | || | | | | | | |   \___ \ ",
+    r"| |_| | (_| | |  |   <| |  __/    | || |_| | |_| | |___ ___) |",
+    r"|____/ \__,_|_|  |_|\_\_|\___|    |_| \___/ \___/|_____|____/ ",
     "                                                              ",
 ]
 

@@ -172,7 +172,6 @@ def _detect_os():
 
 
 def _check_pip_deps():
-    global MISSING_PIPS
     for mod, pkg in PIP_DEPS.items():
         try:
             importlib.import_module(mod)
@@ -181,7 +180,6 @@ def _check_pip_deps():
 
 
 def _check_system_deps():
-    global MISSING_SYSTEM
     _, pkg_mgr = _detect_os()
     per_mgr = SYSTEM_DEPS_BY_MGR.get(pkg_mgr, {})
     for cmd, default_pkg in SYSTEM_DEPS_COMMON.items():
@@ -227,7 +225,6 @@ def _ensure_pip_installed():
     except ImportError:
         pass
     try:
-        import ensurepip
         print(f"  {YELLOW}Pip not found. Bootstrapping via ensurepip...{RESET}")
         subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"],
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -269,7 +266,7 @@ def _install_missing():
     if MISSING_PIPS:
         if _ensure_pip_installed():
             print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-            pip_cmd = [sys.executable, "-m", "pip", "install"] + MISSING_PIPS
+            pip_cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS
             _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
         else:
             print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable).{RESET}")
@@ -298,7 +295,7 @@ def ensure_deps():
         print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
         if _ensure_pip_installed():
             print(f"  {CYAN}Auto-installing Python packages...{RESET}")
-            _run_as_admin([sys.executable, "-m", "pip", "install"] + MISSING_PIPS, "pip install missing packages")
+            _run_as_admin([sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS, "pip install missing packages")
             MISSING_PIPS = []
             _check_pip_deps()
             if MISSING_PIPS:
@@ -321,7 +318,10 @@ def ensure_deps():
             else:
                 print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
         else:
-            ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+            try:
+                ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+            except (EOFError, OSError):
+                ans = "n"
             if ans == "y":
                 _install_missing()
                 MISSING_SYSTEM = []
@@ -366,10 +366,10 @@ init(autoreset=True)
 
 BANNER_LINES = [
     " ____             _    _         _____ ___   ___  _     ____  ",
-    "|  _ \  __ _ _ __| | _(_) ___   |_   _/ _ \ / _ \| |   / ___| ",
-    "| | | |/ _` | '__| |/ / |/ _ \    | || | | | | | | |   \___ \ ",
-    "| |_| | (_| | |  |   <| |  __/    | || |_| | |_| | |___ ___) |",
-    "|____/ \__,_|_|  |_|\_\_|\___|    |_| \___/ \___/|_____|____/ ",
+    r"|  _ \  __ _ _ __| | _(_) ___   |_   _/ _ \ / _ \| |   / ___| ",
+    r"| | | |/ _` | '__| |/ / |/ _ \    | || | | | | | | |   \___ \ ",
+    r"| |_| | (_| | |  |   <| |  __/    | || |_| | |_| | |___ ___) |",
+    r"|____/ \__,_|_|  |_|\_\_|\___|    |_| \___/ \___/|_____|____/ ",
     "                                                              ",
 ]
 
@@ -626,7 +626,7 @@ def net_traffic_monitor():
                 if old_data:
                     try:
                         with open("/proc/net/dev") as f:
-                            new_data = f.read()
+                            f.read()
                         sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}  {c('(install psutil for per-interface stats)', Fore.BLACK)}")
                     except Exception:
                         sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}")
@@ -2110,7 +2110,6 @@ def pentest_instagram():
                 pass
 
             if tested % 20 == 0 or tested == total:
-                pct = tested / total * 100
                 sys.stdout.write(f"\r  {progress_bar(tested, total)}  {c(f'{tested}/{total}', Fore.CYAN)}  {c('Testing...', Fore.YELLOW)}")
                 sys.stdout.flush()
 
@@ -2509,7 +2508,7 @@ INDIAN_NDC = {
     "9810": ("New Delhi", "Delhi", "Delhi NCR"), "9811": ("New Delhi", "Delhi", "Delhi NCR"),
     "9818": ("New Delhi", "Delhi", "Delhi NCR"), "9819": ("New Delhi", "Delhi", "Delhi NCR"),
     "9868": ("New Delhi", "Delhi", "Delhi NCR"), "9871": ("New Delhi", "Delhi", "Delhi NCR"),
-    "9873": ("New Delhi", "Delhi", "Delhi NCR"), "9874": ("New Delhi", "Delhi", "Delhi NCR"),
+    "9873": ("New Delhi", "Delhi", "Delhi NCR"),
     "9910": ("New Delhi", "Delhi", "Delhi NCR"), "9911": ("New Delhi", "Delhi", "Delhi NCR"),
     "9958": ("New Delhi", "Delhi", "Delhi NCR"), "9968": ("New Delhi", "Delhi", "Delhi NCR"),
     "9971": ("New Delhi", "Delhi", "Delhi NCR"),
@@ -2519,8 +2518,7 @@ INDIAN_NDC = {
     "9920": ("Mumbai", "Maharashtra", "Mumbai"), "9930": ("Mumbai", "Maharashtra", "Mumbai"),
     "9987": ("Mumbai", "Maharashtra", "Mumbai"),
     "9830": ("Kolkata", "West Bengal", "Kolkata"), "9831": ("Kolkata", "West Bengal", "Kolkata"),
-    "9836": ("Kolkata", "West Bengal", "Kolkata"), "9874": ("Kolkata", "West Bengal", "Kolkata"),
-    "9875": ("Kolkata", "West Bengal", "Kolkata"), "9903": ("Kolkata", "West Bengal", "Kolkata"),
+    "9836": ("Kolkata", "West Bengal", "Kolkata"), "9875": ("Kolkata", "West Bengal", "Kolkata"), "9903": ("Kolkata", "West Bengal", "Kolkata"),
     "9932": ("Kolkata", "West Bengal", "Kolkata"), "9986": ("Kolkata", "West Bengal", "Kolkata"),
     "9840": ("Chennai", "Tamil Nadu", "Chennai"), "9841": ("Chennai", "Tamil Nadu", "Chennai"),
     "9884": ("Chennai", "Tamil Nadu", "Chennai"), "9886": ("Chennai", "Tamil Nadu", "Chennai"),
@@ -2545,11 +2543,10 @@ INDIAN_NDC = {
     "9815": ("Chandigarh", "Chandigarh", "Chandigarh"), "9872": ("Chandigarh", "Chandigarh", "Chandigarh"),
     "9888": ("Chandigarh", "Chandigarh", "Chandigarh"), "9988": ("Chandigarh", "Chandigarh", "Chandigarh"),
     "9838": ("Lucknow", "Uttar Pradesh", "UP East"), "9839": ("Lucknow", "Uttar Pradesh", "UP East"),
-    "9935": ("Lucknow", "Uttar Pradesh", "UP East"), "9984": ("Lucknow", "Uttar Pradesh", "UP East"),
-    "9450": ("Lucknow", "Uttar Pradesh", "UP East"),
+    "9935": ("Lucknow", "Uttar Pradesh", "UP East"),
     "9835": ("Patna", "Bihar", "Bihar"), "9931": ("Patna", "Bihar", "Bihar"),
     "9934": ("Patna", "Bihar", "Bihar"), "9973": ("Bihar", "Bihar", "Bihar"),
-    "9893": ("Bhopal", "Madhya Pradesh", "MP"), "9892": ("Bhopal", "Madhya Pradesh", "MP"),
+    "9892": ("Bhopal", "Madhya Pradesh", "MP"),
     "9993": ("Bhopal", "Madhya Pradesh", "MP"), "9826": ("Indore", "Madhya Pradesh", "MP"),
     "9827": ("Indore", "Madhya Pradesh", "MP"),
     "9414": ("Lucknow", "Uttar Pradesh", "UP"), "9415": ("Lucknow", "Uttar Pradesh", "UP"),
@@ -2568,7 +2565,7 @@ INDIAN_NDC = {
     "9440": ("Kochi", "Kerala", "Kerala"), "9446": ("Kochi", "Kerala", "Kerala"),
     "9447": ("Thiruvananthapuram", "Kerala", "Kerala"),
     "9448": ("Kozhikode", "Kerala", "Kerala"),
-    "9450": ("Varanasi", "Uttar Pradesh", "UP East"),
+    "9450": ("Varanasi/Lucknow", "Uttar Pradesh", "UP East"),
     "9451": ("Gorakhpur", "Uttar Pradesh", "UP East"),
     "9452": ("Faizabad", "Uttar Pradesh", "UP East"),
     "9453": ("Jhansi", "Uttar Pradesh", "UP"),
@@ -2804,7 +2801,7 @@ INDIAN_NDC = {
     "9890": ("Delhi", "Delhi", "Delhi NCR"),
     "9891": ("Delhi", "Delhi", "Delhi NCR"),
     "9892": ("Bhopal", "Madhya Pradesh", "MP"),
-    "9893": ("Indore", "Madhya Pradesh", "MP"),
+    "9893": ("Indore/Bhopal", "Madhya Pradesh", "MP"),
     "9894": ("Hyderabad", "Telangana", "Hyderabad"),
     "9895": ("Chennai", "Tamil Nadu", "Chennai"),
     "9900": ("Bangalore", "Karnataka", "Bangalore"),
@@ -2863,7 +2860,7 @@ INDIAN_NDC = {
     "9981": ("Bangalore", "Karnataka", "Bangalore"),
     "9982": ("Jaipur", "Rajasthan", "Rajasthan"),
     "9983": ("Jaipur", "Rajasthan", "Rajasthan"),
-    "9984": ("Lucknow", "Uttar Pradesh", "UP"),
+    "9984": ("Lucknow", "Uttar Pradesh", "UP/UP East"),
     "9985": ("Lucknow", "Uttar Pradesh", "UP"),
     "9986": ("Kolkata", "West Bengal", "Kolkata"),
     "9987": ("Mumbai", "Maharashtra", "Mumbai"),
@@ -3188,7 +3185,7 @@ def find_real_ip(domain):
                 try:
                     socket.inet_aton(part)
                     if part not in cf_ips:
-                        origin_ips.append((f"DMARC", part))
+                        origin_ips.append(("DMARC", part))
                         print(f"    {c('DMARC record', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
                 except OSError:
                     pass
@@ -3787,7 +3784,6 @@ def _detect_indian_operator(ndc):
               "70","71","72","73","74","75","76","77","78","79",
               "60","61","62","63","64","65","66","67","68","69"}
     airtel_2d = {"98","99","96","97","90","91","92","93","94","95"}
-    vodafone_2d = {"99","98","97","96","95","94","93","92","91","90"}
     bsnl_2d = {"94","95","96","97","98","99","70","71","72","73","74","75","76","77","78","79"}
     if first_two in jio_2d:
         return "Reliance Jio"
@@ -3795,7 +3791,7 @@ def _detect_indian_operator(ndc):
         return "Airtel"
     if first_digit in ("9","8","7"):
         return "Airtel/Jio (MNP possible)"
-    if first_digit == "6":
+    if first_two in bsnl_2d:
         return "BSNL/Jio (MNP possible)"
     return "Unknown Operator"
 
@@ -4167,7 +4163,7 @@ def osint_social():
     if not user: return
     print(f"  {c(f'Checking {len(SOCIAL_PLATFORMS)} platforms...', Fore.CYAN)}")
     found = 0
-    for platform, (tmpl, missing_indicator) in SOCIAL_PLATFORMS.items():
+    for splatform, (tmpl, missing_indicator) in SOCIAL_PLATFORMS.items():
         url = tmpl.format(user)
         try:
             r = requests.get(url, timeout=6, headers={"User-Agent":"Mozilla/5.0 (compatible; DarkieV2)"}, allow_redirects=True)
@@ -5413,7 +5409,7 @@ def _mc_server_ping(ip, port=25565, timeout=4):
         s.settimeout(timeout)
         plen = _mc_read_varint(s)
         if plen:
-            pid = _mc_read_varint(s)
+            _mc_read_varint(s)
             rlen = _mc_read_varint(s)
             if rlen:
                 data = b""
@@ -6158,7 +6154,6 @@ def osint_recon_engine():
                                 sd, ip = r; found_ips.add(ip)
                                 is_cf = any(ip.startswith(p) for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.", "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.", "197.234.", "198.41."])
                                 label = f"CF {sd}" if is_cf else f"   {sd}"
-                                color = Fore.RED if is_cf else Fore.GREEN
                                 print(f"    {c(label):30s} {c(ip, Fore.YELLOW)}")
                                 _store_host(ip, sd, domain, "crt.sh", is_cf, not is_cf)
             except: pass
@@ -6477,7 +6472,7 @@ def osint_censys_search():
             text = _fetch(f"https://api.mcsrvstat.us/3/{domain}", timeout=10)
             if text:
                 j = json.loads(text)
-                motd = " ".join(j.get("motd", {}).get("clean", []))
+                j.get("motd", {}).get("clean", [])
                 raw_ip = j.get("ip", "")
                 if isinstance(raw_ip, list):
                     mcip = raw_ip[0] if raw_ip else ""
