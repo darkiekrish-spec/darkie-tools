@@ -1,7 +1,10 @@
 [build]
   base = "frontend"
   publish = "."
-  command = "sh ./scripts/netlify-build.sh"
+  # Netlify runs the build command from the base dir (frontend), so call the
+  # repo-level script via "..". The script writes ./runtime-config.js in that
+  # base directory.
+  command = "sh ../scripts/netlify-build.sh"
 
 [context.production]
-  command = "sh ./scripts/netlify-build.sh"
+  command = "sh ../scripts/netlify-build.sh"
