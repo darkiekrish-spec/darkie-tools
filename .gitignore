@@ -17,6 +17,7 @@ website/node_modules/
 # v4 build output
 v4/build/
 v4/dist/
+v4/node_modules/
 v4/*.AppImage
 v4/*.deb
 v4/*.rpm
