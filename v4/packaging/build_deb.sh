@@ -2,7 +2,7 @@
 set -e
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$DIR/build"
-DEB_ROOT="$BUILD/deb/darkie-suite_3.0.0_all"
+DEB_ROOT="$BUILD/deb/darkie-suite_4.0.0_all"
 mkdir -p "$DEB_ROOT/DEBIAN"
 mkdir -p "$DEB_ROOT/usr/share/darkie-suite"
 mkdir -p "$DEB_ROOT/usr/bin"
@@ -23,5 +23,5 @@ cat > "$DEB_ROOT/usr/bin/darkie-suite-web" << 'EOF'
 exec python3 /usr/share/darkie-suite/tool.py --web "$@"
 EOF
 chmod +x "$DEB_ROOT/usr/bin/darkie-suite-gui" "$DEB_ROOT/usr/bin/darkie-suite-web"
-dpkg-deb --build "$DEB_ROOT" "$DIR/dist/darkie-suite_3.0.0_all.deb"
-echo "Debian package built: dist/darkie-suite_3.0.0_all.deb"
+dpkg-deb --build "$DEB_ROOT" "$DIR/dist/darkie-suite_4.0.0_all.deb"
+echo "Debian package built: dist/darkie-suite_4.0.0_all.deb"

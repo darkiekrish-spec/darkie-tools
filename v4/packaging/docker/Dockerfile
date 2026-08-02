@@ -24,4 +24,4 @@ EXPOSE 5000
 
 ENV DISPLAY=:99
 
-CMD ["python3", "tool.py", "--web", "--host", "0.0.0.0", "--port", "5000"]
+CMD ["python3", "tool.py", "--web", "--host", "0.0.0.0"]

@@ -28,5 +28,5 @@ mkdir -p "$DIR/dist"
 cd "$DIR/build"
 wget -c "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage" -O appimagetool 2>/dev/null || echo "Download appimagetool from github.com/AppImage/AppImageKit"
 chmod +x appimagetool 2>/dev/null || true
-./appimagetool AppDir "$DIR/dist/Darkie-Suite-v3-x86_64.AppImage" 2>/dev/null || echo "appimagetool not available. Install from https://github.com/AppImage/AppImageKit/releases"
+./appimagetool AppDir "$DIR/dist/Darkie-Suite-v4-x86_64.AppImage" 2>/dev/null || echo "appimagetool not available. Install from https://github.com/AppImage/AppImageKit/releases"
 echo "AppImage build attempted. Check dist/"

@@ -14,6 +14,6 @@ MACOS
 chmod +x "$APP/Contents/MacOS/DarkieSuite"
 mkdir -p "$DIR/dist"
 cd "$DIR/build"
-hdiutil create -volname "DarkieSuite" -srcfolder DarkieSuite.app -ov -format UDZO "$DIR/dist/DarkieSuite-v3-macos.dmg" 2>/dev/null || echo "hdiutil not available (macOS only). App bundle created at $APP"
+hdiutil create -volname "DarkieSuite" -srcfolder DarkieSuite.app -ov -format UDZO "$DIR/dist/DarkieSuite-v4-macos.dmg" 2>/dev/null || echo "hdiutil not available (macOS only). App bundle created at $APP"
 cp -r "$APP" "$DIR/dist/" 2>/dev/null || true
 echo "macOS build complete. DMG/APP in dist/"

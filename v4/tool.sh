@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  Darkie TOOLS — Universal launcher / installer (one file, all platforms)
+#  Darkie TOOLS v4 — Universal launcher / installer (one file, all platforms)
 #  ---------------------------------------------------------------------------
 #    Local run:            ./tool.sh                (interactive menu)
 #    Web Dashboard:        ./tool.sh --web [port]   (opens in your browser)
@@ -8,8 +8,8 @@
 #    Full install:         ./tool.sh --install      (auto-install deps + make
 #                                                    `darkie-tools` a command)
 #    One-line install:
-#      curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v3/tool.sh | bash
-#      wget -qO-  https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v3/tool.sh | bash
+#      curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
+#      wget -qO-  https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
 #  ---------------------------------------------------------------------------
 #  Works on: Linux, macOS, WSL and Windows-GitBash.
 #  On first run it auto-installs any missing system tools and Python packages.
@@ -49,7 +49,7 @@ need_cmd() {
 
 usage() {
     cat <<EOF
-Darkie TOOLS — Universal Cyber Toolkit (educational, own-account only)
+Darkie TOOLS v4 — Ultimate Cyber Toolkit (educational, own-account only)
 
 USAGE
   ./tool.sh               open the interactive menu
@@ -89,7 +89,7 @@ if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/tool.py" ]; then
 elif [ -f "$INSTALL_DIR/tool.py" ]; then
     TOOL_PY="$INSTALL_DIR/tool.py"
 else
-    VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v3"
+    VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v4"
     # Prefer a prebuilt binary when a release build exists (no Python needed)
     if download "$RAW_BASE/$VERSION/tool.AppImage" "$INSTALL_DIR/tool.AppImage"; then
         chmod +x "$INSTALL_DIR/tool.AppImage"
@@ -114,25 +114,23 @@ for c in python3 python; do
 done
 if [ -z "$PY" ]; then
     echo "ERROR: Python 3 is required but not installed (https://python.org)."
-    echo "  Or clone it: git clone $GH && cd darkie-tools/v3 && ./tool.sh"
+    echo "  Or clone it: git clone $GH && cd darkie-tools/v4 && ./tool.sh"
     exit 1
 fi
 
 # 3) Auto-install missing system tools and Python packages on first run
-echo "==> Checking dependencies (installs anything missing; may ask for your sudo password)..."
-DARKIE_AUTOINSTALL=1 "$PY" "$TOOL_PY" --deps >/dev/null 2>&1 \
-    || DARKIE_AUTOINSTALL=1 "$PY" "$TOOL_PY" --deps || true
+#    DARKIE_SKIP_DEPS=1 skips this (used by the website playground for speed)
+if [ "${DARKIE_SKIP_DEPS:-0}" != "1" ]; then
+    echo "==> Checking dependencies (installs anything missing; may ask for your sudo password)..."
+    DARKIE_AUTOINSTALL=1 "$PY" "$TOOL_PY" --deps >/dev/null 2>&1 \
+        || DARKIE_AUTOINSTALL=1 "$PY" "$TOOL_PY" --deps || true
+fi
 
 # 4) Full install: persist files + add a global `darkie-tools` command
 if [ "$INSTALL_MODE" = "1" ]; then
     if [ -n "$LOCAL_DIR" ] && [ "$LOCAL_DIR" != "$INSTALL_DIR" ]; then
         cp "$LOCAL_DIR/tool.py" "$INSTALL_DIR/tool.py"
         cp -f "$LOCAL_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt" 2>/dev/null || true
-        if [ -f "$LOCAL_DIR/mc_bots.js" ]; then
-            cp -f "$LOCAL_DIR/mc_bots.js" "$INSTALL_DIR/mc_bots.js"
-        elif [ -f "$LOCAL_DIR/../v2.2/mc_bots.js" ]; then
-            cp -f "$LOCAL_DIR/../v2.2/mc_bots.js" "$INSTALL_DIR/mc_bots.js"
-        fi
     fi
     TOOL_PY="$INSTALL_DIR/tool.py"
     cat > "$INSTALL_DIR/darkie-tools" <<EOS

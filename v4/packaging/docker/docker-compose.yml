@@ -8,8 +8,6 @@ services:
     container_name: darkie-suite
     ports:
       - "5000:5000"
-    volumes:
-      - ./data:/opt/darkie-suite/data
     restart: unless-stopped
     cap_add:
       - NET_ADMIN

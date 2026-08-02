@@ -1,5 +1,5 @@
 # ============================================================================
-#  Darkie TOOLS — Universal Windows launcher (PowerShell)
+#  Darkie TOOLS v4 — Universal Windows launcher (PowerShell)
 #  ---------------------------------------------------------------------------
 #    Local run:            .\tool.ps1                 (interactive menu)
 #    Web Dashboard:        .\tool.ps1 --web [port]    (opens in your browser)
@@ -7,7 +7,7 @@
 #    Full install:         .\tool.ps1 --install       (auto-install deps + add
 #                                                      a global `darkie-tools` command)
 #    One-line install:
-#      iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v3/tool.ps1'))
+#      iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.ps1'))
 #  ---------------------------------------------------------------------------
 #  Works on: Windows PowerShell 5.1+ and PowerShell 7.
 #  On first run it auto-installs any missing system tools and Python packages.
@@ -29,7 +29,7 @@ function Get-LatestVersion {
         $versions = $matches | ForEach-Object { $_.Groups[1].Value }
         $versions = $versions | Sort-Object { [version]$_.Substring(1) }
         return $versions[-1]
-    } catch { return "v3" }
+    } catch { return "v4" }
 }
 
 function Download-File {
@@ -57,7 +57,7 @@ function Invoke-AutoInstall {
 
 if ($args -contains "-h" -or $args -contains "--help") {
     Write-Host @"
-Darkie TOOLS - Universal Cyber Toolkit (educational, own-account only)
+Darkie TOOLS v4 - Ultimate Cyber Toolkit (educational, own-account only)
 
 USAGE
   .\tool.ps1              open the interactive menu
@@ -124,13 +124,12 @@ if ($installMode) {
     }
     $cmdPath = Join-Path $InstallDir "darkie-tools.cmd"
     "@echo off`r`n@python `"$toolPy`" %*`r`n" | Set-Content $cmdPath
-    $binDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
-    $linkDir = Join-Path $InstallDir "bin"
-    New-Item -ItemType Directory -Force -Path $linkDir | Out-Null
-    New-Item -ItemType HardLink -Path (Join-Path $linkDir "darkie-tools.cmd") -Value $cmdPath -Force -ErrorAction SilentlyContinue
+    $binDir = Join-Path $InstallDir "bin"
+    New-Item -ItemType Directory -Force -Path $binDir | Out-Null
+    New-Item -ItemType HardLink -Path (Join-Path $binDir "darkie-tools.cmd") -Value $cmdPath -Force -ErrorAction SilentlyContinue
     $envPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($envPath -notlike "*$InstallDir\bin*") {
-        [Environment]::SetEnvironmentVariable("Path", "$envPath;$InstallDir\bin", "User")
+    if ($envPath -notlike "*$binDir*") {
+        [Environment]::SetEnvironmentVariable("Path", "$envPath;$binDir", "User")
     }
     Write-Host "==> Installed. Type darkie-tools from a new terminal to launch."
 }

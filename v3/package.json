@@ -3,7 +3,7 @@
   "version": "3.0.0",
   "description": "Darkie Security Suite — Multi-OS cyber toolkit",
   "bin": {
-    "darkie": "./darkie.sh"
+    "darkie-tools": "./tool.sh"
   },
   "repository": "github:darkiekrish-spec/darkie-tools",
   "homepage": "https://github.com/darkiekrish-spec/darkie-tools",

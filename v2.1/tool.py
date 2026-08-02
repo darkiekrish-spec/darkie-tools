@@ -3195,8 +3195,7 @@ def main():
             print(f"  {RED}Invalid choice.{RESET}")
 
 
-if __name__ == "__main__":
-    main()
+def audit_rootkit_detection():
     box("Rootkit Detection", Fore.RED)
     print(f"  {c('Scanning for common rootkit indicators...', RED)}")
     separator(Fore.RED)
@@ -3503,6 +3502,25 @@ def audit_kernel_hardening():
     print()
 
 
+def hash_generator():
+    box("Hash Generator", Fore.CYAN)
+    text = input(f"  {c(f'Input text {SYM_PROMPT} ', CYAN)}").strip()
+    if not text:
+        return
+    algo = input(f"  {c(f'Algorithm (md5/sha1/sha256/sha512/all) {SYM_PROMPT} ', CYAN)}").strip().lower() or "all"
+    print(f"\n  {c('Hashes:', CYAN)}")
+    separator(Fore.CYAN)
+    algos = ["md5", "sha1", "sha256", "sha384", "sha512"] if algo == "all" else [algo]
+    for a in algos:
+        try:
+            h = hashlib.new(a)
+            h.update(text.encode())
+            print(f"  {c(f'{a.upper():8s}', GREEN)} {c(h.hexdigest(), YELLOW)}")
+        except ValueError:
+            print(f"  {c(f'{a.upper():8s}', RED)} Unknown")
+    print()
+
+
 def hash_identifier():
     box("Hash Identifier", Fore.CYAN)
     h = input(f"  {c(f'Hash {SYM_PROMPT} ', CYAN)}").strip()
@@ -3624,7 +3642,7 @@ def encoder_decoder():
         elif ch == "8":
             result = bytes.fromhex(text).decode(errors="replace")
         elif ch == "9":
-            result = codecs_rot13(text) if 'codecs' in dir() else re.sub(r'[a-zA-Z]', lambda m: chr((ord(m.group()) - 65 + 13) % 26 + 65) if m.group().isupper() else chr((ord(m.group()) - 97 + 13) % 26 + 97), text)
+            result = re.sub(r'[a-zA-Z]', lambda m: chr((ord(m.group()) - 65 + 13) % 26 + 65) if m.group().isupper() else chr((ord(m.group()) - 97 + 13) % 26 + 97), text)
         elif ch == "10":
             result = ""
             for ch_r in text:
@@ -3695,6 +3713,23 @@ def password_generator():
             lines.append(f"  Country: {c(country, YELLOW)}")
             break
     info_box("Telephone", lines, Fore.MAGENTA)
+    print()
+
+
+def tel_analyze():
+    box("Telephone Number Analysis", Fore.MAGENTA)
+    num = input(f"  {c(f'Phone number {SYM_PROMPT} ', CYAN)}").strip()
+    if not num:
+        return
+    cleaned = re.sub(r'[^\d+]', '', num)
+    if not cleaned.startswith('+'):
+        cleaned = '+' + cleaned
+    lines = [f"  Number: {c(cleaned, GREEN)}"]
+    for code, country in sorted(COUNTRY_CODES.items(), key=lambda x: -len(x[0])):
+        if cleaned.startswith('+' + code):
+            lines.append(f"  Country: {c(country, YELLOW)}")
+            break
+    info_box("Telephone Analysis", lines, Fore.MAGENTA)
     print()
 
 
@@ -3863,3 +3898,6 @@ def legacy_traceroute():
     except Exception:
         print(f"  {YELLOW}traceroute not available.{RESET}")
     print()
+
+if __name__ == "__main__":
+    main()

@@ -6,3 +6,35 @@ __pycache__/
 *.encrypted
 *.decrypted
 .integrity_baseline.json
+
+# design briefs and local tooling
+SKILL.md
+
+# website build artifacts (bg.mp4 is intentionally tracked — the anime background)
+website/dist/
+website/node_modules/
+
+# v4 build output
+v4/build/
+v4/dist/
+v4/*.AppImage
+v4/*.deb
+v4/*.rpm
+v4/*.dmg
+v4/*.tar.gz
+v4/tool.exe
+
+# v3 build output
+v3/build/
+v3/dist/
+v3/*.AppImage
+v3/*.deb
+v3/*.rpm
+v3/*.dmg
+v3/*.tar.gz
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp

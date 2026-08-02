@@ -7,11 +7,11 @@ mkdir -p "$RPM_ROOT/SOURCES"
 mkdir -p "$RPM_ROOT/SPECS"
 cat > "$RPM_ROOT/SPECS/darkie-suite.spec" << 'SPEC'
 Name: darkie-suite
-Version: 3.0.0
+Version: 4.0.0
 Release: 1%{?dist}
-Summary: Advanced Cybersecurity & Network Defense Platform
+Summary: Next-Gen Cybersecurity & Network Defense Platform
 License: MIT
-URL: https://github.com/darkie/suite
+URL: https://github.com/darkiekrish-spec/darkie-tools
 BuildArch: noarch
 Requires: python3, python3-pip, python3-tkinter, python3-requests, python3-colorama
 %description
@@ -37,7 +37,7 @@ chmod +x %{buildroot}/usr/bin/darkie-suite-web
 /usr/bin/darkie-suite-web
 SPEC
 cd "$DIR"
-tar czf "$RPM_ROOT/SOURCES/darkie-suite-3.0.0.tar.gz" --transform 's,^,darkie-suite-3.0.0/,' tool.py requirements.txt tool.sh
+tar czf "$RPM_ROOT/SOURCES/darkie-suite-4.0.0.tar.gz" --transform 's,^,darkie-suite-4.0.0/,' tool.py requirements.txt tool.sh
 rpmbuild --define "_topdir $RPM_ROOT" -ba "$RPM_ROOT/SPECS/darkie-suite.spec" 2>/dev/null || echo "rpmbuild not installed. Install: yum install rpm-build"
 mkdir -p "$DIR/dist"
 find "$RPM_ROOT/RPMS" -name "*.rpm" -exec cp {} "$DIR/dist/" \;
