@@ -61,6 +61,11 @@ def strip_ansi(s):
     return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
 
+# CORS: allow the static site on Vercel to call the backend on Render.
+# Override with env var, e.g. CORS_ORIGIN=https://darkie-tools.vercel.app
+CORS_ORIGIN = os.environ.get("CORS_ORIGIN", "*")
+
+
 def run_tool(tool, args):
     """Run the real tool via v4/tool.sh --run. Returns (exit_code, text_output)."""
     cmd = [TOOL_SH, "--run", tool] + args
@@ -87,11 +92,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(body)
 
     def _send_json(self, code, obj):
         self._send(code, json.dumps(obj).encode("utf-8"), MIME[".json"])
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", CORS_ORIGIN)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
@@ -138,9 +154,12 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description="Darkie Tools local website + playground server")
     parser.add_argument("port", nargs="?", type=int, default=int(os.environ.get("PORT", 8000)))
+    parser.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     args = parser.parse_args()
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"  Darkie Tools website + live playground on http://localhost:{args.port}")
+    # On Render we must bind 0.0.0.0; locally keep 127.0.0.1.
+    host = "0.0.0.0" if os.environ.get("RENDER") else args.host
+    httpd = ThreadingHTTPServer((host, args.port), Handler)
+    print(f"  Darkie Tools website + live playground on http://{host}:{args.port}")
     print(f"  Playground runs the real tool via v4/tool.sh (allowlisted tools only).")
     print(f"  Press Ctrl+C to stop.")
     try:

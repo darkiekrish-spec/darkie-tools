@@ -1,0 +1,20 @@
+# Render Blueprint for the Darkie Tools playground backend.
+# Deploy: https://dashboard.render.com/select-repo?type=blueprint
+# The static site (Vercel) calls this service's /api/* endpoints cross-origin.
+services:
+  - type: web
+    name: darkie-tools-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: RENDER
+        value: "true"
+      # Frontend on Vercel is allowed to call this API. Set to your Vercel URL.
+      - key: CORS_ORIGIN
+        sync: false
+      # Playground tools run the real v4 tool; timeouts are handled by server.py.
+    healthCheckPath: /api/version
+    autoDeploy: true

@@ -240,16 +240,22 @@
   /* ---------------- playground: runs the REAL tool via the local server ---------------- */
   const play = $('play-output');
 
+  // API base: defaults to same-origin (local ./serve.sh). When hosted, set
+  // window.DARKIE_API to the Render backend, e.g. https://darkie-tools-api.onrender.com
+  const API_BASE = (window.DARKIE_API || '').replace(/\/+$/, '');
+  const apiURL = (p) => API_BASE + p;
+
   async function callBackend(tool, args) {
     try {
-      const res = await fetch('/api/run', {
+      const res = await fetch(apiURL('/api/run'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tool, args }),
       });
+      if (!res.ok) return { exit: 1, output: `error: API returned HTTP ${res.status}` };
       return await res.json();
     } catch (err) {
-      return { exit: 1, output: 'error: cannot reach the local server. Start it with:\n  ./website/serve.sh' };
+      return { exit: 1, output: 'error: cannot reach the backend. Locally run ./website/serve.sh — or set window.DARKIE_API to the hosted API.' };
     }
   }
 
@@ -279,7 +285,7 @@
   async function showTools() {
     let tools;
     try {
-      const res = await fetch('/api/tools');
+      const res = await fetch(apiURL('/api/tools'));
       tools = await res.json();
     } catch (e) { tools = []; }
     if (!tools.length) {
@@ -359,14 +365,14 @@
   appendLine(play, 'Type help to get started, or tap a chip below.', 'dim');
   (async () => {
     try {
-      const r = await fetch('/api/tools');
+      const r = await fetch(apiURL('/api/tools'));
       if (r.status === 200) {
         const tools = await r.json();
-        appendLine(play, `${tools.length} tools available through the local server.`, 'ok');
+        appendLine(play, `${tools.length} tools available through the backend.`, 'ok');
       } else {
-        appendLine(play, 'server offline — start it with: ./website/serve.sh', 'err');
+        appendLine(play, 'backend offline — locally run ./website/serve.sh (or set window.DARKIE_API)', 'err');
       }
-    } catch (err) { appendLine(play, 'server offline — start it with: ./website/serve.sh', 'err'); }
+    } catch (err) { appendLine(play, 'backend offline — locally run ./website/serve.sh (or set window.DARKIE_API)', 'err'); }
   })();
   runSelfScan();
   startLogTape();
