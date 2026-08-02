@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="description" content="Darkie Tools — a cyber toolkit with an anime soul. Network monitoring, vulnerability scanning, OSINT, pentesting, SIEM and stress testing in one command line." />
+  <meta name="theme-color" content="#0b0614" />
+  <title>Darkie Tools — a cyber toolkit with an anime soul</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Zen+Tokyo+Zoo&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <script>document.documentElement.classList.add('js');</script>
+
+  <!-- anime background video (graceful: JS hides if it fails to load) -->
+  <video id="bg-video" autoplay muted loop playsinline preload="auto" poster="" aria-hidden="true">
+    <source src="bg.mp4" type="video/mp4" />
+  </video>
+  <div class="bg-shade" aria-hidden="true"></div>
+
+  <!-- particle connection map -->
+  <canvas id="particles" aria-hidden="true"></canvas>
+  <div class="scanlines" aria-hidden="true"></div>
+  <div id="scroll-progress" aria-hidden="true"></div>
+
+  <header class="nav">
+    <div class="nav-inner container">
+      <a class="brand" href="#top">
+        <span class="brand-glyph">雷</span>
+        <span class="brand-name">Darkie<strong>Tools</strong></span>
+      </a>
+      <nav class="nav-links">
+        <a href="#modules">Modules</a>
+        <a href="#playground">Playground</a>
+        <a href="#install">Install</a>
+      </nav>
+      <a class="btn btn-ghost" href="https://github.com/darkiekrish-spec/darkie-tools" target="_blank" rel="noopener">
+        GitHub <span class="gh-arrow">↗</span>
+      </a>
+    </div>
+  </header>
+
+  <main id="top">
+    <!-- ============ HERO: live scan over the anime night ============ -->
+    <section class="hero container">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="eyebrow">darkie-tools <span class="dot-live"></span> v4 online</p>
+          <h1 class="display">
+            <span class="display-line">Scan the</span>
+            <span class="display-line"><span class="neon" id="typewriter"></span></span>
+          </h1>
+          <p class="lede">One command line for monitoring, vulnerability checks, OSINT, pentest, SIEM and stress testing. 17 modules, 100+ tools, terminal + web + desktop — on Linux, macOS and Windows.</p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#install">Install</a>
+            <a class="btn btn-ghost" href="#playground">Try the playground</a>
+          </div>
+          <p class="legality">For ethical testing of systems you own or have permission to test.</p>
+        </div>
+
+        <!-- live scan of the visitor's own public IP -->
+        <div class="console" id="scan-console">
+          <div class="console-bar">
+            <span class="c-dot c-red"></span><span class="c-dot c-amber"></span><span class="c-dot c-green"></span>
+            <span class="c-title">darkie — scan</span>
+            <span class="c-wave"><span class="c-wave-bar"></span><span class="c-wave-bar"></span><span class="c-wave-bar"></span><span class="c-wave-bar"></span><span class="c-wave-bar"></span></span>
+          </div>
+          <div class="console-body" id="scan-output">
+            <p class="line dim">$ darkie-tools --scan --target self</p>
+            <p class="line" id="scan-step-1"><span class="ok">✓</span> resolving public endpoint…</p>
+          </div>
+          <div class="console-foot"><span class="blink">▮</span> live — runs in your browser, no data leaves it</div>
+        </div>
+      </div>
+
+      <div class="hero-stats">
+        <div class="stat"><span class="stat-num" data-target="100">0</span><span class="stat-label">tools</span></div>
+        <div class="stat"><span class="stat-num" data-target="17">0</span><span class="stat-label">modules</span></div>
+        <div class="stat"><span class="stat-num" data-target="3">0</span><span class="stat-label">platforms</span></div>
+        <div class="stat"><span class="stat-num" data-target="10000">0</span><span class="stat-label">lines of code</span></div>
+      </div>
+    </section>
+
+    <!-- marquee log tape -->
+    <div class="logtape" aria-hidden="true"><span id="logtape-inner"></span></div>
+
+    <!-- ============ MODULES: command palette ============ -->
+    <section class="section container" id="modules">
+      <p class="eyebrow">the arsenal</p>
+      <h2 class="section-title">A command palette of <span class="neon">defense</span> and <span class="cyber">recon</span></h2>
+      <p class="section-lede">Every capability maps to a menu key. Pick one, run it, export the result.</p>
+
+      <div class="palette">
+        <div class="p-row"><span class="p-key">01</span><span class="p-name">network &amp; threat</span><span class="p-desc">capture · IDS · arp · port-scan · ddos</span></div>
+        <div class="p-row"><span class="p-key">02</span><span class="p-name">endpoint security</span><span class="p-desc">processes · files · connections</span></div>
+        <div class="p-row"><span class="p-key">03</span><span class="p-name">vulnerability mgmt</span><span class="p-desc">scan · CVE · assess · config</span></div>
+        <div class="p-row"><span class="p-key">04</span><span class="p-name">data protection</span><span class="p-desc">aes-256 · passwords · brute-detect</span></div>
+        <div class="p-row"><span class="p-key">05</span><span class="p-name">ethical pentest</span><span class="p-desc">sqli · xss · methods · login</span></div>
+        <div class="p-row"><span class="p-key">06</span><span class="p-name">siem &amp; logs</span><span class="p-desc">analyze · monitor · alerts</span></div>
+        <div class="p-row"><span class="p-key">07</span><span class="p-name">stress testing</span><span class="p-desc">minecraft · web · ip flood</span></div>
+        <div class="p-row"><span class="p-key">08</span><span class="p-name">osint recon</span><span class="p-desc">phone · email · geo · dns · sub</span></div>
+        <div class="p-row"><span class="p-key">09</span><span class="p-name">telephone</span><span class="p-desc">analyze · format · country codes</span></div>
+        <div class="p-row"><span class="p-key">10</span><span class="p-name">network utils</span><span class="p-desc">ports · ssl · headers · ping · trace</span></div>
+        <div class="p-row"><span class="p-key">11</span><span class="p-name">hash &amp; crypto</span><span class="p-desc">generate · identify · crack · encode</span></div>
+        <div class="p-row"><span class="p-key">12</span><span class="p-name">system audit</span><span class="p-desc">rootkit · suid · cron · kernel</span></div>
+        <div class="p-row"><span class="p-key">13</span><span class="p-name">advanced network</span><span class="p-desc">knock · banner · revshell · lan</span></div>
+        <div class="p-row"><span class="p-key">14</span><span class="p-name">advanced osint</span><span class="p-desc">ct log · dns history · wayback · shodan</span></div>
+        <div class="p-row"><span class="p-key">15</span><span class="p-name">wifi &amp; wireless</span><span class="p-desc">scan · audit · deauth · wpa</span></div>
+        <div class="p-row"><span class="p-key">16</span><span class="p-name">reports</span><span class="p-desc">html · json · csv export</span></div>
+        <div class="p-row"><span class="p-key">17</span><span class="p-name">graphical interfaces</span><span class="p-desc">web dashboard · desktop app</span></div>
+      </div>
+    </section>
+
+    <!-- ============ PLAYGROUND ============ -->
+    <section class="section alt container" id="playground">
+      <p class="eyebrow">live playground</p>
+      <h2 class="section-title">Type <span class="neon">help</span> to start</h2>
+      <p class="section-lede">Every command below runs against the real Darkie Tools CLI through the local server — live output, not a demo.</p>
+
+      <div class="console console-wide">
+        <div class="console-bar">
+          <span class="c-dot c-red"></span><span class="c-dot c-amber"></span><span class="c-dot c-green"></span>
+          <span class="c-title">darkie — ./tool.sh</span>
+        </div>
+        <div class="console-body" id="play-output"></div>
+        <div class="console-input">
+          <span class="prompt">❯</span>
+          <input id="play-cmd" autocomplete="off" spellcheck="false" aria-label="playground command" />
+        </div>
+      </div>
+      <div class="chips" id="chips">
+        <button class="chip" data-cmd="run osint_ipgeo 8.8.8.8">osint 8.8.8.8</button>
+        <button class="chip" data-cmd="run vuln_cve_lookup CVE-2024-3094">CVE lookup</button>
+        <button class="chip" data-cmd="run legacy_sslcheck example.com">SSL check</button>
+        <button class="chip" data-cmd="run hash_generator darkie-tools">hash</button>
+        <button class="chip" data-cmd="run legacy_ping 127.0.0.1 2">ping</button>
+        <button class="chip" data-cmd="run tel_analyze +919876543210">phone</button>
+        <button class="chip" data-cmd="help">help</button>
+      </div>
+    </section>
+
+    <!-- ============ INSTALL ============ -->
+    <section class="section container" id="install">
+      <p class="eyebrow">install</p>
+      <h2 class="section-title">Up in <span class="neon">one line</span></h2>
+
+      <div class="install-grid">
+        <div class="code-block">
+          <div class="code-head">linux · macOS · WSL</div>
+          <pre><code id="code-sh">bash -c "$(curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh)"</code></pre>
+          <button class="copy-btn" data-target="code-sh">copy</button>
+        </div>
+        <div class="code-block">
+          <div class="code-head">windows · powershell</div>
+          <pre><code id="code-ps">iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.ps1'))</code></pre>
+          <button class="copy-btn" data-target="code-ps">copy</button>
+        </div>
+      </div>
+
+      <div class="install-notes">
+        <div class="note"><span class="note-key">python 3.10+</span><span class="note-val">deps auto-install on first run</span></div>
+        <div class="note"><span class="note-key">--web</span><span class="note-val">dashboard at :8000</span></div>
+        <div class="note"><span class="note-key">--gui</span><span class="note-val">desktop window</span></div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <div class="brand">
+        <span class="brand-glyph">雷</span>
+        <span class="brand-name">Darkie<strong>Tools</strong></span>
+      </div>
+      <p class="footer-line">Built for ethical security testing and learning.</p>
+      <p class="footer-meta">© 2026 darkie-tools · <span id="status">idle</span></p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
