@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  darkie-suite:
+    build: ..
+    container_name: darkie-suite
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/opt/darkie-suite/data
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+    network_mode: host
