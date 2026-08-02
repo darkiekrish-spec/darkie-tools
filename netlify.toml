@@ -1,0 +1,7 @@
+[build]
+  base = "frontend"
+  publish = "."
+  command = "sh ./scripts/netlify-build.sh"
+
+[context.production]
+  command = "sh ./scripts/netlify-build.sh"
