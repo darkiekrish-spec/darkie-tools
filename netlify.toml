@@ -1,9 +1,0 @@
-[build]
-  base = "frontend"
-  publish = "."
-  # Netlify runs the build command from the base dir (frontend). Use an
-  # inline command so the build does not rely on repo-relative scripts.
-  command = "bash -lc 'printf \"window.DARKIE_API = \\\"%s\\\";\\n\" \"$DARKIE_API\" > runtime-config.js'"
-
-[context.production]
-  command = "bash -lc 'printf \"window.DARKIE_API = \\\"%s\\\";\\n\" \"$DARKIE_API\" > runtime-config.js'"
