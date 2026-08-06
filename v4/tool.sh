@@ -22,14 +22,38 @@ INSTALL_DIR="${DARKIE_TOOLS_HOME:-$HOME/.darkie-tools}"
 INSTALL_MODE="0"
 UPDATE_MODE="0"
 
-# Auto-detect the latest version folder from the repo
+# v_gt A B -> exit 0 (true) if numeric dotted version A > B
+v_gt() {
+    local a b i ad bd max
+    IFS=. read -ra a <<< "${1#v}"
+    IFS=. read -ra b <<< "${2#v}"
+    max=${#a[@]}
+    (( ${#b[@]} > max )) && max=${#b[@]}
+    for (( i=0; i<max; i++ )); do
+        ad=$(( 10${a[$i]:-0} ))
+        bd=$(( 10${b[$i]:-0} ))
+        (( ad > bd )) && return 0
+        (( ad < bd )) && return 1
+    done
+    return 1
+}
+
+# Auto-detect the latest version folder from the repo (portable: macOS + GNU)
 detect_latest() {
     local api="https://api.github.com/repos/darkiekrish-spec/darkie-tools/contents/"
+    local list="" best="0" v ver
     if command -v curl &>/dev/null; then
-        curl -fsSL "$api" 2>/dev/null | grep -o '"name":"v[^"]*"' | grep -o 'v[0-9.]*' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+        list="$(curl -fsSL "$api" 2>/dev/null)"
     elif command -v wget &>/dev/null; then
-        wget -qO- "$api" 2>/dev/null | grep -o '"name":"v[^"]*"' | grep -o 'v[0-9.]*' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+        list="$(wget -qO- "$api" 2>/dev/null)"
     fi
+    [ -z "$list" ] && { printf 'v4\n'; return 0; }
+    for v in $(printf '%s' "$list" | grep -o '"name":"v[0-9][0-9.]*"' | grep -o 'v[0-9][0-9.]*'); do
+        [[ "$v" =~ ^v[0-9]+(\.[0-9]+)*$ ]] || continue
+        ver="${v#v}"
+        if v_gt "$ver" "$best"; then best="$ver"; fi
+    done
+    printf 'v%s\n' "$best"
 }
 
 # download <url> <out> -> 0 on success, non-zero otherwise
@@ -138,12 +162,22 @@ if [ -z "$PY" ]; then
     exit 1
 fi
 
-# 3) Auto-install missing system tools and Python packages on first run
+# 3) Auto-install missing Python packages on first run (works on any OS).
 #    DARKIE_SKIP_DEPS=1 skips this (used by the website playground for speed)
-if [ "${DARKIE_SKIP_DEPS:-0}" != "1" ]; then
-    echo "==> Checking dependencies (installs anything missing; may ask for your sudo password)..."
-    DARKIE_AUTOINSTALL=1 "$PY" "$TOOL_PY" --deps >/dev/null 2>&1 \
-        || DARKIE_AUTOINSTALL=1 "$PY" "$TOOL_PY" --deps || true
+if [ "${DARKIE_SKIP_DEPS:-0}" != "1" ] && [ -f "$INSTALL_DIR/requirements.txt" ]; then
+    echo "==> Installing Python dependencies (pip install -r requirements.txt) ..."
+    "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
+    # skip packaging-only pyinstaller for speed
+    if command -v grep >/dev/null 2>&1; then
+        grep -v -i '^[[:space:]]*pyinstaller' "$INSTALL_DIR/requirements.txt" > "$INSTALL_DIR/requirements.runtime.txt" 2>/dev/null || true
+    fi
+    if [ -s "$INSTALL_DIR/requirements.runtime.txt" ]; then
+        "$PY" -m pip install --quiet --disable-pip-version-check --upgrade -r "$INSTALL_DIR/requirements.runtime.txt" >/dev/null 2>&1 \
+            || "$PY" -m pip install --quiet --disable-pip-version-check -r "$INSTALL_DIR/requirements.txt" >/dev/null 2>&1 || true
+    else
+        "$PY" -m pip install --quiet --disable-pip-version-check --upgrade -r "$INSTALL_DIR/requirements.txt" >/dev/null 2>&1 || true
+    fi
+    rm -f "$INSTALL_DIR/requirements.runtime.txt"
 fi
 
 # 4) Full install: persist files + add a global `darkie-tools` command

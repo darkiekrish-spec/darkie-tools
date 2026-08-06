@@ -5,19 +5,28 @@ Advanced Cybersecurity & Network Defense Platform — 100+ tools across 17 modul
 
 ## Quick Start
 
-**Linux / macOS / WSL:**
+The installer works on **Linux (Ubuntu, Kali, Arch, Debian, Fedora…), macOS
+and Windows (PowerShell / WSL / Git Bash)** — no git clone needed. It auto-detects
+the newest version from the repo and asks whether to **run live** or **install on
+system** (adds a global `darkie-tools` command).
+
+**Linux / macOS / WSL / Git Bash:**
 ```bash
 curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash
 ```
-
-It asks whether you want to **run live** (just launch it) or **install on system**
-(adds a global `darkie-tools` command) — no git clone needed. To skip the prompt:
+To skip the prompt:
 ```bash
 curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash -s -- --install   # install
 curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash -s -- --live     # run once
 ```
 ```bash
 wget -qO- https://darkifolio.vercel.app/darkie-tool/install | bash
+```
+
+**Windows (PowerShell 5.1+ / 7):**
+```powershell
+iex (iwr https://darkifolio.vercel.app/darkie-tool/install.ps1)
+iex (iwr https://darkifolio.vercel.app/darkie-tool/install.ps1) --install   # skip prompt
 ```
 
 The installer automatically fetches the **newest version** from the repo
@@ -27,11 +36,6 @@ on first run** (may ask for your sudo/admin password).
 Power users / direct repo:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
-```
-
-**Windows (PowerShell):**
-```powershell
-iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.ps1'))
 ```
 
 The installers try a prebuilt binary first (from GitHub releases) and automatically
