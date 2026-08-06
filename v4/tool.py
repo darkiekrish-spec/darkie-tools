@@ -3546,90 +3546,141 @@ _WEB_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Darkie TOOLS v4 — Web Console</title>
+<title>Darkie TOOLS — v4 console</title>
 <style>
+:root{
+  --bg:#080b10; --panel2:#0f141c; --line:#1b2333; --line2:#263149;
+  --text:#dfe6f2; --muted:#8b95a9; --faint:#5b6478;
+  --acc:#2fe6a3; --accdim:#1e9c74; --amber:#ffb454; --red:#ff5c69;
+  --mono:ui-monospace,"SFMono-Regular","Cascadia Code","JetBrains Mono",Consolas,"Liberation Mono",monospace;
+  --sans:"Inter","Segoe UI",system-ui,-apple-system,sans-serif;
+}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,#161b3a,#05070f 60%);color:#eef3ff;height:100vh;display:flex;flex-direction:column}
-header{display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid rgba(124,92,255,.25)}
-.logo{font-size:17px;font-weight:800;letter-spacing:.2px;background:linear-gradient(90deg,#7c5cff,#00d4ff);-webkit-background-clip:text;background-clip:text;color:transparent}
-.status{font-size:12px;padding:4px 11px;border-radius:20px;background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.35)}
-.status.busy{background:rgba(233,69,96,.12);color:#ff7b72;border-color:rgba(233,69,96,.4)}
-#runlbl{font-size:12px;color:#8a94ad;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38%}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);display:flex;flex-direction:column;overflow:hidden;
+  background-image:radial-gradient(60rem 40rem at 88% -12%,rgba(47,230,163,.055),transparent 60%),
+                   radial-gradient(52rem 34rem at -8% 112%,rgba(110,168,255,.045),transparent 60%)}
+/* ---------------- header ---------------- */
+header{flex:none;display:flex;align-items:center;gap:16px;height:58px;padding:0 22px;border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:12px;user-select:none}
+.mark{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-family:var(--mono);font-weight:800;font-size:15px;
+  color:var(--acc);background:linear-gradient(145deg,#0e251d,#081410);border:1px solid rgba(47,230,163,.45);box-shadow:0 0 0 3px rgba(47,230,163,.06)}
+.name{font-size:15px;font-weight:800;letter-spacing:.2px}
+.ver{font:10.5px var(--mono);color:var(--faint);border-left:1px solid var(--line2);padding-left:10px;align-self:center}
+.status{margin-left:auto;display:flex;align-items:center;gap:8px;font:11.5px var(--mono);color:var(--faint)}
+.status i{width:8px;height:8px;border-radius:50%;background:var(--acc);box-shadow:0 0 9px var(--accdim)}
+.status.busy i{background:var(--amber);box-shadow:0 0 9px #a86e1f;animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.3}}
+#runlbl{max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--muted)}
+/* ---------------- shell ---------------- */
 main{flex:1;display:flex;min-height:0}
-aside{width:292px;border-right:1px solid rgba(124,92,255,.2);overflow-y:auto;padding:12px;background:rgba(7,10,22,.4)}
-.search input{width:100%;padding:8px 12px;border-radius:8px;border:1px solid rgba(124,92,255,.35);background:rgba(10,14,30,.7);color:#eef3ff;font-size:12px;outline:none}
-.gtitle{font-size:11px;color:#8a94ad;text-transform:uppercase;letter-spacing:.6px;padding:10px 8px 4px;font-weight:700}
-.tool{display:block;width:100%;text-align:left;background:transparent;border:0;color:#cfe0ff;padding:7px 10px;border-radius:7px;font-size:12.5px;cursor:pointer;transition:background .15s}
-.tool:hover{background:rgba(124,92,255,.2)}
-section{flex:1;display:flex;flex-direction:column;min-width:0;padding:16px 20px}
-.termbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
-.termbar .t{font-size:12px;color:#8a94ad}
-.termbar button{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#eef3ff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px}
-.termbar button:hover{background:#e94560;border-color:#e94560}
-#term{flex:1;overflow-y:auto;background:rgba(2,4,10,.9);border:1px solid rgba(124,92,255,.3);border-radius:12px;padding:14px;font:12.5px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all}
-#term .out{color:#d7e2ff}#term .in{color:#7ee787;font-weight:600}#term .err{color:#ff7b72}#term .warn{color:#ffb45e}#term .tag{color:#8a94ad;font-style:italic}
-#term:empty::before{content:"Pick a tool on the left to run it. Output streams here live.";color:#5b6478;font-style:italic}
-.promptbar{display:none;align-items:center;gap:10px;margin-top:12px;background:rgba(10,14,30,.85);border:1px solid #7c5cff;border-radius:10px;padding:10px 14px}
-.promptbar.show{display:flex}
-.peek{background:rgba(74,222,128,.15);padding:2px 8px;border-radius:6px;font-size:11px;color:#7ee787}
-.promptbar .q{color:#93c5fd;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
-.promptbar input{flex:1;background:transparent;border:0;border-bottom:1px solid rgba(124,92,255,.5);color:#eef3ff;padding:6px;font:12.5px Consolas,monospace;outline:none}
-.promptbar button{background:linear-gradient(90deg,#7c5cff,#00d4ff);border:0;color:#fff;padding:7px 16px;border-radius:8px;cursor:pointer;font-weight:700}
-::-webkit-scrollbar{width:8px;background:#0d0d1a}::-webkit-scrollbar-thumb{background:#3a2d6b;border-radius:4px}
-footer{text-align:center;padding:10px;color:#5b6478;font-size:11px;border-top:1px solid rgba(124,92,255,.15)}
-</style></head>
+aside{flex:none;width:304px;border-right:1px solid var(--line);display:flex;flex-direction:column;background:linear-gradient(180deg,rgba(255,255,255,.014),transparent)}
+.search-wrap{padding:16px 14px 10px}
+.search-wrap label{display:flex;align-items:center;gap:9px;height:36px;padding:0 12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;transition:border-color .15s}
+.search-wrap label:focus-within{border-color:var(--accdim)}
+.search-wrap svg{flex:none;width:14px;height:14px;color:var(--faint)}
+.search-wrap input{flex:1;border:0;background:transparent;color:var(--text);font:12px var(--mono);outline:0}
+.search-wrap input::placeholder{color:var(--faint)}
+#tree{flex:1;overflow-y:auto;padding:2px 10px 16px}
+.gtitle{font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:var(--faint);font-weight:700;padding:15px 10px 6px}
+.tool{display:flex;align-items:center;gap:10px;width:100%;text-align:left;background:transparent;border:0;color:var(--muted);
+  padding:6px 10px;border-radius:7px;font-size:12.5px;cursor:pointer;transition:background .12s,color .12s}
+.tool .idx{font:10px var(--mono);color:var(--faint);width:18px;flex:none}
+.tool:hover{background:rgba(47,230,163,.08);color:var(--text)}
+.tool:hover .idx{color:var(--acc)}
+.tool:active{background:rgba(47,230,163,.14)}
+/* ---------------- terminal ---------------- */
+section{flex:1;display:flex;flex-direction:column;min-width:0;padding:18px 22px 20px}
+.termhead{flex:none;display:flex;align-items:center;gap:11px;margin-bottom:10px}
+.dots{display:flex;gap:6px}
+.dots span{width:10px;height:10px;border-radius:50%}
+.dots .r{background:#ff5f63}.dots .y{background:#f5b93c}.dots .g{background:#3ecf6e}
+.termname{font:11px var(--mono);color:var(--faint);letter-spacing:.05em}
+.termhead .spacer{flex:1}
+.termhead button{background:transparent;border:1px solid var(--line);color:var(--muted);padding:5px 13px;border-radius:7px;cursor:pointer;font:11px var(--mono);transition:.12s}
+.termhead button:hover{color:#fff;border-color:var(--red);background:rgba(255,92,105,.09)}
+#term{flex:1;overflow-y:auto;background:#05070c;border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;
+  padding:15px 17px;font:12.5px/1.65 var(--mono);white-space:pre-wrap;word-break:break-word;color:#cbd4e7}
+#term .out{color:#d5deef}#term .in{color:var(--acc);font-weight:600}#term .err{color:var(--red)}
+#term .warn{color:var(--amber)}#term .tag{color:var(--faint);font-style:italic}
+#term:empty::before{content:"Select a tool from the left panel. Output streams here.";color:var(--faint);font-style:italic}
+/* ---------------- prompt ---------------- */
+.promptbar{flex:none;display:none;align-items:center;gap:12px;background:#05070c;border:1px solid var(--line);border-radius:0 0 12px 12px;padding:13px 17px}
+.promptbar.show{display:flex;animation:rise .16s ease}
+@keyframes rise{from{opacity:0;transform:translateY(5px)}}
+.peek{flex:none;font:10px var(--mono);color:var(--acc);border:1px solid rgba(47,230,163,.4);padding:2px 8px;border-radius:5px;letter-spacing:.1em;text-transform:uppercase}
+.promptbar .q{flex:none;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:13px var(--mono);color:var(--text)}
+.promptbar input{flex:1;background:transparent;border:0;color:var(--acc);padding:8px 2px;font:13px var(--mono);outline:0}
+.promptbar button{flex:none;background:transparent;border:1px solid var(--accdim);color:var(--acc);padding:6px 18px;border-radius:7px;cursor:pointer;font:600 12px var(--mono);transition:.12s}
+.promptbar button:hover{background:var(--acc);color:#04231a;border-color:var(--acc)}
+/* ---------------- scroll + footer ---------------- */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#1b2330;border-radius:6px;border:2px solid var(--bg)}
+::-webkit-scrollbar-thumb:hover{background:#273348}
+::-webkit-scrollbar-track{background:transparent}
+footer{flex:none;text-align:center;padding:9px;font-size:11px;color:var(--faint);border-top:1px solid var(--line);letter-spacing:.02em}
+</style>
+</head>
 <body>
 <header>
-  <div class="logo">&#9670; Darkie TOOLS v4 — Web Console</div>
-  <div class="status" id="status">idle</div>
+  <div class="brand"><div class="mark">◈</div><div class="name">Darkie&nbsp;TOOLS</div><div class="ver">v4&nbsp;console</div></div>
   <div id="runlbl"></div>
-  <div style="flex:1"></div>
+  <div class="status" id="status"><i></i><span id="stext">idle</span></div>
 </header>
 <main>
 <aside>
-  <div class="gtitle">Search</div>
-  <input id="q" placeholder="Filter tools…" oninput="render()">
+  <div class="search-wrap">
+    <label><svg viewBox="0 0 16 16" fill="none"><circle cx="7" cy="7" r="4.5" stroke="currentColor"/><path d="M10.5 10.5L14 14" stroke="currentColor"/></svg><input id="q" placeholder="filter tools…" oninput="render()" spellcheck="false"></label>
+  </div>
   <div id="tree"></div>
 </aside>
 <section>
-  <div class="termbar"><div class="t">Output</div><button onclick="clearOut()">Clear</button></div>
+  <div class="termhead">
+    <div class="dots"><span class="r"></span><span class="y"></span><span class="g"></span></div>
+    <div class="termname">output — stream</div>
+    <div class="spacer"></div>
+    <button onclick="clearOut()">clear</button>
+  </div>
   <div id="term"></div>
   <div class="promptbar" id="promptbar">
-    <div class="peek" id="peek">input</div>
+    <div class="peek">input</div>
     <div class="q" id="pquestion"></div>
-    <input id="pinput" onkeydown="if(event.key==='Enter')sendAnswer()" autocomplete="off">
-    <button onclick="sendAnswer()">Send</button>
+    <input id="pinput" onkeydown="if(event.key==='Enter')sendAnswer()" autocomplete="off" spellcheck="false">
+    <button onclick="sendAnswer()">send ↵</button>
   </div>
 </section>
 </main>
-<footer>Darkie TOOLS v4 — educational use only. Test only systems you own or have permission to test.</footer>
+<footer>Darkie TOOLS — educational use only · test only systems you own or have permission to test</footer>
 <script>
-let tools=[];let pos=0;
-function setStatus(running){const s=document.getElementById('status');s.textContent=running?'busy':'idle';s.className='status'+(running?' busy':'');}
+let tools=[],pos=0;
+function setStatus(running){const s=document.getElementById('status'),t=document.getElementById('stext');t.textContent=running?'busy':'idle';s.classList.toggle('busy',running);}
 async function loadTools(){const r=await fetch('/_data/tools');const d=await r.json();tools=d.tools;setStatus(d.running);render();}
 function render(){
- const q=document.getElementById('q').value.toLowerCase();
- const tree=document.getElementById('tree');tree.innerHTML='';
- tools.forEach(g=>{
-   const items=g.items.filter(t=>t[0].toLowerCase().includes(q));
-   if(!items.length)return;
-   const d=document.createElement('div');
-   const t=document.createElement('div');t.className='gtitle';t.textContent=g.name;d.appendChild(t);
-   items.forEach(i=>{const b=document.createElement('button');b.className='tool';b.textContent=i[0];b.onclick=()=>runTool(i[1],i[0]);d.appendChild(b);});
-   tree.appendChild(d);
- });
+  const q=document.getElementById('q').value.toLowerCase();
+  const tree=document.getElementById('tree');tree.innerHTML='';
+  tools.forEach(g=>{
+    const items=g.items.filter(t=>t[0].toLowerCase().includes(q));
+    if(!items.length)return;
+    const d=document.createElement('div');
+    const t=document.createElement('div');t.className='gtitle';t.textContent=g.name;d.appendChild(t);
+    items.forEach(i=>{const b=document.createElement('button');b.className='tool';
+      const x=document.createElement('span');x.className='idx';x.textContent=String(Array.from(g.items).indexOf(i)+1).padStart(2,'0');
+      b.appendChild(x);b.appendChild(document.createTextNode(i[0]));
+      b.onclick=()=>runTool(i[1],i[0]);d.appendChild(b);});
+    tree.appendChild(d);
+  });
 }
-async function runTool(key,label){document.getElementById('runlbl').textContent=label;setStatus(true);await fetch('/_data/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool:key,label})});}
+async function runTool(key,label){document.getElementById('runlbl').textContent='› '+label;setStatus(true);await fetch('/_data/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool:key,label})});}
 const term=document.getElementById('term');
 function addLine(tag,text){const el=document.createElement('div');el.className=tag;el.textContent=text||' ';term.appendChild(el);while(term.childNodes.length>6000)term.removeChild(term.firstChild);term.scrollTop=term.scrollHeight;}
 async function poll(){
- const r=await fetch('/_data/poll?pos='+pos);const d=await r.json();
- (d.lines||[]).forEach((t,i)=>addLine((d.tags||[])[i]||'out',t));
- pos=d.pos;setStatus(d.running);
- if(d.prompt){showPrompt(d.prompt);}else hidePrompt();
- setTimeout(poll,240);
+  const r=await fetch('/_data/poll?pos='+pos);const d=await r.json();
+  (d.lines||[]).forEach((t,i)=>addLine((d.tags||[])[i]||'out',t));
+  pos=d.pos;setStatus(d.running);
+  if(d.prompt){showPrompt(d.prompt);}else hidePrompt();
+  setTimeout(poll,240);
 }
-function showPrompt(text){const pb=document.getElementById('promptbar');if(!pb.classList.contains('show')){pb.classList.add('show');document.getElementById('pquestion').textContent=(text||'').trim();}document.getElementById('pinput').focus();}
+function showPrompt(text){const pb=document.getElementById('promptbar');if(!pb.classList.contains('show')){pb.classList.add('show');document.getElementById('pquestion').textContent=(text||'').trim();}const inp=document.getElementById('pinput');inp.focus();}
 function hidePrompt(){document.getElementById('promptbar').classList.remove('show');}
 async function sendAnswer(){const inp=document.getElementById('pinput');await fetch('/_data/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:inp.value})});inp.value='';hidePrompt();}
 async function clearOut(){await fetch('/_data/clear',{method:'POST'});term.innerHTML='';pos=0;}
@@ -3742,6 +3793,11 @@ def start_desktop_gui():
             style.configure("TButton", background=_ACCENT, foreground=_TEXT, padding=[8, 4])
             nb = ttk.Notebook(root)
             nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            head = ttk.Frame(root)
+            head.pack(fill=tk.X, padx=10, pady=(10, 0))
+            ttk.Label(head, text="Darkie TOOLS", font=("Segoe UI", 15, "bold"), foreground=_FG).pack(side=tk.LEFT)
+            ttk.Label(head, text="v4  ·  security console", font=("Consolas", 10), foreground="#8a94ad").pack(side=tk.LEFT, padx=(10, 0))
+            ttk.Button(head, text="✕", width=3, command=root.destroy).pack(side=tk.RIGHT)
             self.tools_tab = ttk.Frame(nb)
             nb.add(self.tools_tab, text="  Tools  ")
             self.console_tab = ttk.Frame(nb)
