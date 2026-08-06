@@ -20,6 +20,7 @@ GH="https://github.com/darkiekrish-spec/darkie-tools"
 RAW_BASE="https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main"
 INSTALL_DIR="${DARKIE_TOOLS_HOME:-$HOME/.darkie-tools}"
 INSTALL_MODE="0"
+UPDATE_MODE="0"
 
 # Auto-detect the latest version folder from the repo
 detect_latest() {
@@ -68,6 +69,7 @@ USAGE
   ./tool.sh --gui         open the Desktop GUI (tkinter)
   ./tool.sh --host 0.0.0.0 --web   share the dashboard over your network
   ./tool.sh --install     install dependencies and add a global \`darkie-tools\` command
+  ./tool.sh --update      download the newest version and update your local copy
 
 On first run, missing system tools and Python packages are installed
 automatically (may ask for your sudo/admin password). Python 3 is required.
@@ -79,6 +81,7 @@ for a in "$@"; do
     case "$a" in
         -h|--help) usage ;;
         --install) INSTALL_MODE="1" ;;
+        -u|--update|-update) UPDATE_MODE="1" ;;
     esac
 done
 
@@ -94,14 +97,21 @@ fi
 # --------------------------------------------------------------------------
 mkdir -p "$INSTALL_DIR"
 TOOL_PY=""
-if [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/tool.py" ]; then
-    TOOL_PY="$LOCAL_DIR/tool.py"
+NEED_DL="0"
+if [ "$UPDATE_MODE" = "1" ]; then
+    NEED_DL="1"                                      # --update: always refresh
+elif [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/tool.py" ]; then
+    TOOL_PY="$LOCAL_DIR/tool.py"                     # run straight from repo dir
 elif [ -f "$INSTALL_DIR/tool.py" ]; then
-    TOOL_PY="$INSTALL_DIR/tool.py"
+    TOOL_PY="$INSTALL_DIR/tool.py"                   # already cached/installed
 else
+    NEED_DL="1"
+fi
+
+if [ "$NEED_DL" = "1" ]; then
     VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v4"
     # Prefer a prebuilt binary when a release build exists (no Python needed)
-    if download "$RAW_BASE/$VERSION/tool.AppImage" "$INSTALL_DIR/tool.AppImage"; then
+    if [ "$UPDATE_MODE" != "1" ] && download "$RAW_BASE/$VERSION/tool.AppImage" "$INSTALL_DIR/tool.AppImage"; then
         chmod +x "$INSTALL_DIR/tool.AppImage"
         reattach_tty "$INSTALL_DIR/tool.AppImage" "$@"
     fi
@@ -164,7 +174,7 @@ fi
 ARGS=()
 for a in "$@"; do
     case "$a" in
-        --install) ;;
+        --install|-u|--update|-update) ;;
         *) ARGS+=("$a") ;;
     esac
 done
