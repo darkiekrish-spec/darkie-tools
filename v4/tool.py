@@ -3759,6 +3759,18 @@ def start_web_gui(host="127.0.0.1", port=5000):
 
 def start_desktop_gui():
     """Run the desktop app (tkinter) with the full tool catalog."""
+
+    _BG = "#0b0e14"
+    _PANEL = "#10141c"
+    _PANEL2 = "#151b27"
+    _LINE = "#1d2534"
+    _TEXT = "#e2e9f6"
+    _MUTED = "#8b95a9"
+    _FAINT = "#5b6478"
+    _ACC = "#2fe6a3"
+    _AMBER = "#ffb454"
+    _RED = "#ff5c69"
+
     try:
         import tkinter as tk
         from tkinter import ttk, scrolledtext, simpledialog
@@ -3767,11 +3779,79 @@ def start_desktop_gui():
         print(f"  {YELLOW}Linux: sudo apt install python3-tk{RESET}")
         return
 
-    _BG = "#101a2e"
-    _BG2 = "#0c1526"
-    _ACCENT = "#243b63"
-    _FG = "#35e0a0"
-    _TEXT = "#e8eefb"
+    try:
+        _sans = ("Segoe UI", 10); _sans_b = ("Segoe UI", 10, "bold"); _sans_big = ("Segoe UI", 15, "bold")
+        _mono = ("Consolas", 10); _mono_b = ("Consolas", 10, "bold")
+    except Exception:
+        _sans = (); _sans_b = (); _sans_big = (); _mono = (); _mono_b = ()
+
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure(".", background=_BG, foreground=_TEXT, bordercolor=_LINE,
+                    lightcolor=_PANEL, darkcolor=_PANEL, troughcolor=_PANEL2)
+    style.configure("TFrame", background=_BG)
+    style.configure("TLabel", background=_BG, foreground=_TEXT, font=_sans)
+    style.configure("TNotebook", background=_BG, borderwidth=0)
+    style.configure("TNotebook.Tab", background=_BG, foreground=_FAINT, padding=(18, 9), font=_sans_b)
+    style.map("TNotebook.Tab", background=[("selected", "#0f131b")], foreground=[("selected", _ACC)])
+    style.configure("TButton", background=_PANEL2, foreground=_TEXT, font=_sans_b, borderwidth=0,
+                    padding=(14, 7), focusthickness=0)
+    style.map("TButton", background=[("active", "#202a3d")])
+    style.configure("Run.TButton", background=_ACC, foreground="#04231a", font=_sans_b, padding=(16, 7))
+    style.map("Run.TButton", background=[("active", "#45efb2")])
+
+    class PromptBar:
+        def __init__(self, parent, app, after_widget):
+            self.app = app
+            self.bar = tk.Frame(parent, bg=_PANEL2, highlightbackground=_LINE, highlightthickness=1)
+            self.tag = tk.Label(self.bar, text="INPUT", bg=_PANEL2, fg=_ACC, font=_mono)
+            self.tag.pack(side=tk.LEFT, padx=12)
+            self.q = tk.Label(self.bar, text="", bg=_PANEL2, fg=_TEXT, font=_mono, anchor="w")
+            self.q.pack(side=tk.LEFT, padx=(8, 0))
+            self.entry = tk.Entry(self.bar, bg=_PANEL2, fg=_ACC, insertbackground=_ACC, font=_mono,
+                                  relief=tk.FLAT, highlightthickness=0)
+            self.entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=12)
+            self.btn = tk.Button(self.bar, text="send ↵", bg=_PANEL2, fg=_ACC, activebackground=_ACC,
+                                 activeforeground="#04231a", relief=tk.FLAT, font=_mono, cursor="hand2",
+                                 bd=0, highlightthickness=0, command=self._send)
+            self.btn.pack(side=tk.RIGHT, padx=12)
+            self.entry.bind("<Return>", lambda _: self._send())
+            self._after = after_widget
+
+        def _send(self):
+            self.app.sess.answer(self.entry.get())
+            self.entry.delete(0, tk.END)
+            self.bar.pack_forget()
+
+        def show(self, prompt):
+            self.q.config(text=(prompt or "Input").strip())
+            self.bar.pack(side=tk.BOTTOM, fill=tk.X, after=self._after)
+
+    class Term:
+        def __init__(self, parent, app):
+            self.app = app
+            head = tk.Frame(parent, bg=_PANEL)
+            head.pack(side=tk.TOP, fill=tk.X)
+            tk.Label(head, text="OUTPUT", bg=_PANEL, fg=_FAINT, font=_mono, padx=12).pack(side=tk.LEFT, pady=7)
+            tk.Label(head, text="streaming live", bg=_PANEL, fg=_FAINT, font=_mono).pack(side=tk.LEFT, padx=(4, 0))
+            body = tk.Frame(parent, bg=_PANEL, highlightbackground=_LINE, highlightthickness=1)
+            body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.txt = scrolledtext.ScrolledText(body, wrap=tk.WORD, bg="#04060b", fg="#cdd6e8",
+                                                 insertbackground=_TEXT, font=_mono, relief=tk.FLAT, bd=0,
+                                                 highlightthickness=0, padx=10, pady=6)
+            self.txt.pack(fill=tk.BOTH, expand=True)
+            self.txt.tag_config("out", foreground="#d5deef")
+            self.txt.tag_config("in", foreground=_ACC, font=_mono_b)
+            self.txt.tag_config("err", foreground=_RED)
+            self.txt.tag_config("warn", foreground=_AMBER)
+            self.txt.tag_config("tag", foreground=_FAINT, font=_mono)
+            self.promptbar = PromptBar(body, app, after_widget=self.txt)
+
+        def write(self, tag, text):
+            self.txt.config(state=tk.NORMAL)
+            self.txt.insert(tk.END, text + "\n", tag)
+            self.txt.see(tk.END)
+            self.txt.config(state=tk.DISABLED)
 
     class App:
         def __init__(self, root):
@@ -3780,168 +3860,155 @@ def start_desktop_gui():
             self.pos = 0
             self.prompt_open = False
             self.keys = []
-            self.root.title("Darkie TOOLS v4")
-            self.root.geometry("1180x760")
+            self.root.title("Darkie TOOLS v4 — security console")
             self.root.configure(bg=_BG)
-            style = ttk.Style()
-            style.theme_use("clam")
-            style.configure("TNotebook", background=_BG, borderwidth=0)
-            style.configure("TNotebook.Tab", background=_BG2, foreground=_TEXT, padding=[10, 5], font=("Segoe UI", 10, "bold"))
-            style.map("TNotebook.Tab", background=[("selected", _ACCENT)], foreground=[("selected", _FG)])
-            style.configure("TFrame", background=_BG)
-            style.configure("TLabel", background=_BG, foreground=_TEXT)
-            style.configure("TButton", background=_ACCENT, foreground=_TEXT, padding=[8, 4])
-            nb = ttk.Notebook(root)
-            nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-            head = ttk.Frame(root)
-            head.pack(fill=tk.X, padx=10, pady=(10, 0))
-            ttk.Label(head, text="Darkie TOOLS", font=("Segoe UI", 15, "bold"), foreground=_FG).pack(side=tk.LEFT)
-            ttk.Label(head, text="v4  ·  security console", font=("Consolas", 10), foreground="#8a94ad").pack(side=tk.LEFT, padx=(10, 0))
-            ttk.Button(head, text="✕", width=3, command=root.destroy).pack(side=tk.RIGHT)
-            self.tools_tab = ttk.Frame(nb)
-            nb.add(self.tools_tab, text="  Tools  ")
-            self.console_tab = ttk.Frame(nb)
-            nb.add(self.console_tab, text="  Console  ")
-            self._build_tools()
-            self._build_console()
+            self.root.geometry("1180x780")
+            self.root.minsize(880, 600)
+            self._build_header(root)
+            self._build_root(root)
             self._poll()
 
-        # ---------- Tools tab ----------
+        def _build_header(self, root):
+            hd = tk.Frame(root, bg=_PANEL, height=58, bd=0, highlightthickness=0)
+            hd.pack(side=tk.TOP, fill=tk.X, padx=1, pady=1)
+            hd.pack_propagate(False)
+            tk.Label(hd, text="◈  Darkie TOOLS", bg=_PANEL, fg=_ACC, font=_sans_big).pack(side=tk.LEFT, padx=(14, 6))
+            tk.Label(hd, text="v4  ·  security console", bg=_PANEL, fg=_FAINT, font=_mono).pack(side=tk.LEFT, padx=(6, 0))
+            self.dot = tk.Label(hd, text="●", bg=_PANEL, fg=_ACC, font=_mono)
+            self.dot.pack(side=tk.RIGHT, padx=(0, 14))
+            self.headlbl = tk.Label(hd, text="Ready", bg=_PANEL, fg=_MUTED, font=_mono)
+            self.headlbl.pack(side=tk.RIGHT, before=self.dot, padx=(0, 8))
+
+        def _build_root(self, root):
+            nb = ttk.Notebook(root)
+            nb.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=8, pady=6)
+            self.tools_tab = ttk.Frame(nb)
+            nb.add(self.tools_tab, text="   Tools   ")
+            self.console_tab = ttk.Frame(nb)
+            nb.add(self.console_tab, text="   Console   ")
+            self._build_tools()
+            self._build_console()
+
         def _build_tools(self):
-            fr = ttk.Frame(self.tools_tab)
-            fr.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-            left = ttk.Frame(fr)
-            left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
-            ttk.Label(left, text="Filter").pack(anchor="w")
+            wrap = ttk.Frame(self.tools_tab)
+            wrap.pack(fill=tk.BOTH, expand=True)
+            side = tk.Frame(wrap, bg=_PANEL, bd=0, highlightbackground=_LINE, highlightthickness=1)
+            side.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 1))
+            tk.Label(side, text="TOOLS", bg=_PANEL, fg=_FAINT, font=_mono, padx=10, pady=8).pack(anchor="w")
             self.svar = tk.StringVar()
-            e = ttk.Entry(left, textvariable=self.svar, width=26)
-            e.pack(fill=tk.X, pady=(2, 6))
-            e.bind("<KeyRelease>", lambda _: self._refill())
-            self.listbox = tk.Listbox(left, bg=_BG2, fg=_TEXT, selectbackground=_ACCENT,
-                                      selectforeground=_TEXT, highlightthickness=0, width=36,
-                                      font=("Segoe UI", 10), relief=tk.FLAT)
-            self.listbox.pack(fill=tk.BOTH, expand=True)
-            row = ttk.Frame(left)
-            row.pack(fill=tk.X, pady=(6, 0))
-            ttk.Button(row, text="Run", command=self._run_selected).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 3))
-            ttk.Button(row, text="Stop", command=self._stop).pack(side=tk.LEFT, expand=True, fill=tk.X)
-            self.status = ttk.Label(fr, text="Ready", foreground=_FG)
-            self.status.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
-            right = ttk.Frame(fr)
-            right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
-            self.term = scrolledtext.ScrolledText(right, wrap=tk.WORD, bg=_BG2, fg=_TEXT,
-                                                  insertbackground=_TEXT, font=("Consolas", 10), state=tk.DISABLED)
-            self.term.pack(fill=tk.BOTH, expand=True)
-            for tag, color in (("out", "#d7e2ff"), ("in", _FG), ("err", "#ff7b72"),
-                               ("warn", "#ffb45e"), ("tag", "#8a94ad")):
-                self.term.tag_config(tag, foreground=color)
-            self.term.tag_config("in", font=("Consolas", 10, "bold"))
-            self.term.tag_config("tag", font=("Consolas", 10, "italic"))
+            self.svar.trace_add("write", lambda *_: self._refill())
+            tk.Entry(side, bg=_PANEL2, fg=_TEXT, insertbackground=_TEXT, relief=tk.FLAT,
+                     highlightbackground=_LINE, highlightcolor=_ACC, highlightthickness=1,
+                     font=_mono, bd=0, width=30).pack(padx=10, pady=(0, 8), fill=tk.X)
+            self.list = tk.Listbox(side, bg=_PANEL, fg=_MUTED, bd=0, font=_mono,
+                                   selectbackground=_BG, selectforeground=_ACC,
+                                   highlightthickness=0, activestyle="none", cursor="hand2",
+                                   exportselection=False)
+            self.list.pack(fill=tk.BOTH, expand=True, padx=6)
+            self.list.bind("<Double-Button-1>", lambda _: self._run_selected())
+            btnrow = tk.Frame(side, bg=_PANEL, bd=0)
+            btnrow.pack(fill=tk.X, padx=10, pady=10)
+            self.run_btn = ttk.Button(btnrow, text="Run", style="Run.TButton", command=self._run_selected)
+            self.run_btn.pack(side=tk.LEFT, expand=True, fill=tk.X)
+            ttk.Button(btnrow, text="Stop", command=self._stop).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
+            self.termpanel = tk.Frame(wrap, bg=_BG)
+            self.termpanel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+            self.term = Term(self.termpanel, self)
             self._refill()
 
         def _refill(self):
             q = self.svar.get().lower()
-            self.listbox.delete(0, tk.END)
+            self.list.delete(0, tk.END)
             self.keys = []
             for name, items in DASHBOARD_TOOLS:
-                self.listbox.insert(tk.END, f"  {name.upper()}")
-                self.listbox.itemconfig(tk.END, foreground="#8a94ad")
+                self.list.insert(tk.END, "   " + name.upper())
+                self.list.itemconfig(tk.END, foreground=_FAINT)
                 self.keys.append(None)
                 for label, key in items:
                     if q and q not in label.lower():
                         continue
-                    self.listbox.insert(tk.END, f"    {label}     [{key}]")
+                    self.list.insert(tk.END, "    " + label)
                     self.keys.append((label, key))
 
-        def _run_selected(self):
-            sel = self.listbox.curselection()
+        def _get_sel(self):
+            sel = self.list.curselection()
             if not sel or self.keys[sel[0]] is None:
+                return None
+            return self.keys[sel[0]]
+
+        def _run_selected(self):
+            leaf = self._get_sel()
+            if not leaf:
                 return
-            label, key = self.keys[sel[0]]
+            label, key = leaf
             if self.sess.start(key, label):
-                self.status.config(text=f"Running: {label}", foreground="#ffb45e")
+                self._set_status(running=True, label="Running: " + label)
 
         def _stop(self):
             self.sess.stop()
-            self.status.config(text="Stopped", foreground="#ff7b72")
+            self._set_status(running=False, label="Stopped")
 
-        # ---------- Console tab ----------
+        def _set_status(self, running, label):
+            self.headlbl.config(text=label)
+            self.dot.config(fg=_AMBER if running else _ACC)
+
         def _build_console(self):
             fr = ttk.Frame(self.console_tab)
-            fr.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-            self.cterm = scrolledtext.ScrolledText(fr, wrap=tk.WORD, bg=_BG2, fg=_TEXT,
-                                                   insertbackground=_TEXT, font=("Consolas", 10), state=tk.DISABLED)
-            self.cterm.pack(fill=tk.BOTH, expand=True)
-            row = ttk.Frame(fr)
+            fr.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+            cwrap = tk.Frame(fr, bg=_PANEL, highlightbackground=_LINE, highlightthickness=1)
+            cwrap.pack(fill=tk.BOTH, expand=True)
+            self.cterm = Term(cwrap, self)
+            row = tk.Frame(fr, bg=_BG, bd=0)
             row.pack(fill=tk.X, pady=(6, 0))
             self.cmd_var = tk.StringVar()
-            e = ttk.Entry(row, textvariable=self.cmd_var)
+            e = tk.Entry(row, bg=_PANEL2, fg=_TEXT, insertbackground=_TEXT, relief=tk.FLAT,
+                         highlightbackground=_LINE, highlightcolor=_ACC, highlightthickness=1, font=_mono, bd=0)
             e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
             e.bind("<Return>", lambda _: self._console_run())
             ttk.Button(row, text="Run", command=self._console_run).pack(side=tk.RIGHT)
-
-        def _console_write(self, s):
-            def _do():
-                self.cterm.configure(state=tk.NORMAL)
-                self.cterm.insert(tk.END, s)
-                self.cterm.see(tk.END)
-                self.cterm.configure(state=tk.DISABLED)
-            self.root.after(0, _do)
 
         def _console_run(self):
             cmd = self.cmd_var.get().strip()
             if not cmd:
                 return
             self.cmd_var.set("")
-            self._console_write(f"> {cmd}\n")
-            import sys as _sys
-            old_out = _sys.stdout
-
-            class _W:
-                def write(self, s):
-                    self.s = s
-                def flush(self):
-                    pass
-            w = _W()
+            self.cterm.write("out", "> " + cmd)
+            import io as _io, sys as _sys
 
             def run():
-                buf = []
-                old = _sys.stdout
-                import io as _io
                 f = _io.StringIO()
+                old = _sys.stdout
                 _sys.stdout = f
                 try:
                     exec(cmd, globals())
                 except Exception as ex:
-                    print(f"Error: {ex}")
+                    print("Error: {0}".format(ex))
                 finally:
                     _sys.stdout = old
                 self._console_write(f.getvalue())
             threading.Thread(target=run, daemon=True).start()
 
-        # ---------- main loop ----------
+        def _console_write(self, s):
+            def _do():
+                self.cterm.write("out", s.rstrip("\n"))
+            self.root.after(0, _do)
+
         def _poll(self):
-            if not self.sess.running and self.status.cget("text") not in ("Ready",):
-                self.status.config(text="Ready", foreground=_FG)
             lines, self.pos = self.sess.snapshot(self.pos)
-            if lines:
-                self.term.configure(state=tk.NORMAL)
-                for tag, text in lines:
-                    self.term.insert(tk.END, text + "\n", tag)
-                self.term.see(tk.END)
-                self.term.configure(state=tk.DISABLED)
+            for tag, text in lines:
+                self.term.write(tag, text)
             if self.sess.wants_input() and not self.prompt_open:
                 self.prompt_open = True
                 self.root.after(0, self._ask_prompt)
+            if not self.sess.running and self.headlbl.cget("text") not in ("Ready", "Stopped"):
+                self.headlbl.config(text="Ready")
+                self.dot.config(fg=_ACC)
             self.root.after(120, self._poll)
 
         def _ask_prompt(self):
             prompt = self.sess.wants_input()
-            if prompt is None:
-                self.prompt_open = False
-                return
-            resp = simpledialog.askstring("Darkie TOOLS", (prompt or "Input:").strip(), parent=self.root)
-            self.sess.answer(resp if resp is not None else "")
+            if prompt is not None:
+                self.term.promptbar.show(prompt)
             self.prompt_open = False
 
     root = tk.Tk()
