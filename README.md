@@ -9,6 +9,13 @@ Advanced Cybersecurity & Network Defense Platform — 100+ tools across 17 modul
 ```bash
 curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash
 ```
+
+It asks whether you want to **run live** (just launch it) or **install on system**
+(adds a global `darkie-tools` command) — no git clone needed. To skip the prompt:
+```bash
+curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash -s -- --install   # install
+curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash -s -- --live     # run once
+```
 ```bash
 wget -qO- https://darkifolio.vercel.app/darkie-tool/install | bash
 ```
