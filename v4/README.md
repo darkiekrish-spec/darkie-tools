@@ -24,10 +24,11 @@ Or use the one-file launcher (auto-installs deps on first run):
 .\tool.bat                # Windows double-click
 ```
 
-One-line install:
+One-line install (auto-detects the newest repo version):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
+curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash
+./tool.sh --update        # upgrade to the newest version at any time
 ```
 
 ```powershell

@@ -5,12 +5,21 @@ Advanced Cybersecurity & Network Defense Platform — 100+ tools across 17 modul
 
 ## Quick Start
 
-**Linux / macOS:**
+**Linux / macOS / WSL:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
+curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash
 ```
 ```bash
-wget -qO- https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
+wget -qO- https://darkifolio.vercel.app/darkie-tool/install | bash
+```
+
+The installer automatically fetches the **newest version** from the repo
+(no releases needed), then installs and launches it. **Dependencies auto-install
+on first run** (may ask for your sudo/admin password).
+
+Power users / direct repo:
+```bash
+curl -fsSL https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main/v4/tool.sh | bash
 ```
 
 **Windows (PowerShell):**
@@ -19,14 +28,13 @@ iex ((New-Object System.Net.WebClient).DownloadString('https://raw.githubusercon
 ```
 
 The installers try a prebuilt binary first (from GitHub releases) and automatically
-fall back to running the Python source if no binary is available. **Dependencies
-auto-install on first run** (system tools + Python packages; may ask for your
-sudo/admin password).
+fall back to running the Python source if no binary is available.
 
 **Make it a system command** (Linux/macOS/WSL):
 ```bash
 ./tool.sh --install       # installs deps + adds a global `darkie-tools` command
 darkie-tools              # launch from anywhere (menu / --web / --gui)
+darkie-tools --update     # fetch & upgrade to the newest version at any time
 ```
 
 **Run from source (any OS):**
