@@ -3357,201 +3357,380 @@ def menu_reports():
 #  WEB DASHBOARD + DESKTOP GUI
 # ══════════════════════════════════════════════════════
 
-GUI_MODULES = [
-    {"id": "menu_net", "name": "Network & Threat"},
-    {"id": "menu_endpoint", "name": "Endpoint Security"},
-    {"id": "menu_vuln", "name": "Vulnerability Mgmt"},
-    {"id": "menu_data", "name": "Data Protection"},
-    {"id": "menu_pentest", "name": "Pentest"},
-    {"id": "menu_siem", "name": "SIEM & Logs"},
-    {"id": "menu_stress", "name": "Stress Testing"},
-    {"id": "menu_osint", "name": "OSINT Recon"},
-    {"id": "menu_telephone", "name": "Telephone"},
-    {"id": "menu_netutils", "name": "Network Utils"},
-    {"id": "menu_hash_crypto", "name": "Hash & Crypto"},
-    {"id": "menu_audit", "name": "System Audit"},
-    {"id": "menu_advnet", "name": "Advanced Network"},
-    {"id": "menu_advosint", "name": "Advanced OSINT"},
-    {"id": "menu_wifi", "name": "WiFi"},
-    {"id": "menu_reports", "name": "Reports"},
-    {"id": "osint_recon_engine", "name": "Recon Engine"},
+DASHBOARD_TOOLS = [
+    ("Network & Threat", [
+        ("Packet Capture", "net_capture"), ("Traffic Monitor", "net_traffic_monitor"),
+        ("IDS Detection", "net_ids"), ("ARP Spoof Detect", "net_arp_detect"),
+        ("Port-Scan Detect", "net_portscan_detect"), ("DDoS Detect", "net_ddos_detect"),
+    ]),
+    ("Endpoint Security", [
+        ("Process Monitor", "ep_process_monitor"), ("Suspicious Process", "ep_suspicious_processes"),
+        ("File Integrity", "ep_file_integrity"), ("Net Connections", "ep_network_connections"),
+    ]),
+    ("Vulnerability Mgmt", [
+        ("Advanced Port Scan", "vuln_advanced_scan"), ("CVE Lookup", "vuln_cve_lookup"),
+        ("Vuln Assessment (nmap)", "vuln_assessment"), ("Config Checker", "vuln_config_check"),
+    ]),
+    ("Data & Access", [
+        ("File Encrypt/Decrypt", "data_encrypt"), ("Password Strength", "data_password_strength"),
+        ("Brute-Force Detect", "data_bruteforce_detect"),
+    ]),
+    ("Ethical Pentest", [
+        ("SQLi Detector", "pentest_sqli"), ("XSS Scanner", "pentest_xss"),
+        ("HTTP Methods Fuzzer", "pentest_http_methods"), ("Login Brute-Force", "pentest_login_bruteforce"),
+    ]),
+    ("SIEM & Logs", [
+        ("Log Analyzer", "siem_log_analyzer"), ("Real-time Log Monitor", "siem_realtime"),
+        ("Alert Dashboard", "siem_alert_viewer"),
+    ]),
+    ("Stress Testing", [
+        ("Minecraft Stress", "stress_minecraft"), ("Web Stress", "stress_http"),
+        ("IP Flood", "stress_ip"),
+    ]),
+    ("OSINT Recon", [
+        ("Phone Lookup", "osint_phone"), ("Email OSINT", "osint_email"),
+        ("IP Geolocation", "osint_ipgeo"), ("DNS Enum", "osint_dns"),
+        ("Subdomain Discovery", "osint_subdomain"), ("Website Recon", "osint_website"),
+        ("Whois", "osint_whois"),
+    ]),
+    ("Telephone", [
+        ("Analyze Number", "tel_analyze"), ("Format Number", "tel_format"),
+    ]),
+    ("Network Utils", [
+        ("Port Scanner", "legacy_portscan"), ("SSL/TLS Check", "legacy_sslcheck"),
+        ("HTTP Headers", "legacy_httpheaders"), ("Ping", "legacy_ping"),
+        ("Traceroute", "legacy_traceroute"),
+    ]),
+    ("Hash & Crypto", [
+        ("Hash Generator", "hash_generator"), ("Hash Identifier", "hash_identifier"),
+        ("Hash Cracker", "hash_cracker"), ("Encoder/Decoder", "encoder_decoder"),
+        ("Password Generator", "password_generator"),
+    ]),
+    ("System Audit", [
+        ("Rootkit Detection", "audit_rootkit"), ("SUID/SGID Scan", "audit_suid"),
+        ("Cron Analyzer", "audit_cron"), ("Kernel Hardening", "audit_kernel"),
+    ]),
+    ("Advanced Network", [
+        ("Port Knocking", "adv_port_knock"), ("Banner Grab", "adv_banner"),
+        ("Reverse Shell Detect", "adv_revshell"), ("LAN Discovery", "adv_lan_discovery"),
+    ]),
+    ("Advanced OSINT", [
+        ("Cert Transparency", "osint_ct_log"), ("DNS History", "osint_dns_history"),
+        ("Wayback Machine", "osint_wayback"), ("Recon Engine", "osint_recon_engine"),
+    ]),
+    ("WiFi & Wireless", [
+        ("WiFi Scanner", "wifi_scan"), ("WiFi Security Audit", "wifi_audit"),
+        ("WPA Handshake/Crack", "wifi_password_audit"),
+    ]),
+    ("Reports", [
+        ("HTML Report", "report_html"),
+    ]),
 ]
+
+
+class InteractiveSession:
+    """Runs a tool in a thread and bridges its input()/print() to a UI."""
+
+    def __init__(self):
+        self._lines = []
+        self._lock = threading.Lock()
+        self._acc = ""
+        self.running = False
+        self.tool_name = ""
+        self._stop = threading.Event()
+        self._prompt_evt = threading.Event()
+        self._have_answer = threading.Event()
+        self._prompt = ""
+        self._answer = None
+
+    class _Stream:
+        def __init__(self, sess):
+            self._sess = sess
+
+        def write(self, data):
+            self._sess._raw(data)
+            return len(data)
+
+        def flush(self):
+            pass
+
+    def _emit(self, tag, text):
+        with self._lock:
+            self._lines.append((tag, text))
+            if len(self._lines) > 3000:
+                del self._lines[: len(self._lines) - 3000]
+
+    def _raw(self, chunk):
+        with self._lock:
+            self._acc += chunk
+            while "\n" in self._acc:
+                line, self._acc = self._acc.split("\n", 1)
+                self._lines.append(("out", line.rstrip("\r")))
+                if len(self._lines) > 3000:
+                    del self._lines[: len(self._lines) - 3000]
+
+    @staticmethod
+    def _strip(s):
+        return re.sub(r"\x1b\[[0-9;]*m", "", s)
+
+    def ask(self, prompt=""):
+        if self._stop.is_set():
+            return ""
+        self._prompt = self._strip(prompt or "")
+        if self._prompt:
+            self._emit("in", self._prompt.rstrip())
+        self._prompt_evt.set()
+        self._have_answer.clear()
+        self._have_answer.wait()
+        ans = self._answer if self._answer is not None else ""
+        self._answer = None
+        self._prompt_evt.clear()
+        self._emit("in", self._strip(ans))
+        return ans
+
+    def wants_input(self):
+        return self._prompt if self._prompt_evt.is_set() else None
+
+    def answer(self, value):
+        self._answer = value
+        self._have_answer.set()
+
+    def stop(self):
+        self._stop.set()
+        self._answer = ""
+        self._have_answer.set()
+
+    def start(self, funcname, label):
+        if self.running:
+            return False
+        fn = globals().get(funcname)
+        if not callable(fn):
+            return False
+        with self._lock:
+            self._lines = []
+        self._acc = ""
+        self._stop.clear()
+        self._have_answer.clear()
+        self._prompt_evt.clear()
+        self._answer = None
+        self.running = True
+        self.tool_name = label or funcname
+        threading.Thread(target=self._run, args=(fn,), daemon=True).start()
+        return True
+
+    def _run(self, fn):
+        import builtins as _b, sys as _sys
+        stream = self._Stream(self)
+        old_out, old_in = _sys.stdout, _b.input
+        _sys.stdout = stream
+        _b.input = self.ask
+        try:
+            fn()
+            self._emit("tag", f"[+] {self.tool_name} completed")
+        except KeyboardInterrupt:
+            self._emit("warn", "[!] interrupted")
+        except Exception as e:
+            self._emit("err", f"[!] Error: {e}")
+        finally:
+            _sys.stdout = old_out
+            _b.input = old_in
+            self.running = False
+            self.tool_name = ""
+
+    def snapshot(self, pos):
+        with self._lock:
+            lines = list(self._lines)
+        return lines[pos:], len(lines)
 
 _WEB_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Darkie TOOLS v4 — Web Dashboard</title>
+<title>Darkie TOOLS v4 — Web Console</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:linear-gradient(135deg,#05070f,#0a0f1f 50%,#05070f);color:#eef3ff;min-height:100vh;padding:20px}
-.wrap{max-width:1100px;margin:0 auto}
-h1{font-size:26px;font-weight:800;letter-spacing:-.5px;background:linear-gradient(90deg,#7c5cff,#00d4ff);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:4px}
-.sub{color:#8a94ad;font-size:13px;margin-bottom:18px}
-.module-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px;margin-bottom:18px}
-.module-btn{background:rgba(22,33,62,.7);color:#eef3ff;border:1px solid rgba(124,92,255,.35);padding:11px 14px;cursor:pointer;font-size:13px;font-weight:600;text-align:left;border-radius:10px;transition:all .2s}
-.module-btn:hover{background:rgba(124,92,255,.25);border-color:#e94560;transform:translateY(-1px)}
-.module-btn.running{background:linear-gradient(90deg,#e94560,#ff5cc8);color:#fff;border-color:#ff5cc8}
-#output{background:rgba(3,5,12,.85);border:1px solid rgba(124,92,255,.3);border-radius:12px;padding:16px;height:46vh;overflow-y:auto;font-size:13px;line-height:1.6;white-space:pre-wrap;word-break:break-all;font-family:Consolas,monospace}
-#output .info{color:#93c5fd}#output .success{color:#4ade80}#output .error{color:#ff4444}#output .warn{color:#ffaa00}
-::-webkit-scrollbar{width:8px;background:#0d0d1a}::-webkit-scrollbar-thumb{background:#533483;border-radius:4px}
-.toolbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.clear-btn{background:rgba(255,255,255,.06);color:#eef3ff;border:1px solid rgba(255,255,255,.15);padding:8px 16px;cursor:pointer;border-radius:10px;font-size:12px;font-weight:600}
-.clear-btn:hover{background:#e94560;border-color:#e94560}
-.footer{margin-top:20px;text-align:center;color:#8a94ad;font-size:12px}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:radial-gradient(1200px 600px at 50% -10%,#161b3a,#05070f 60%);color:#eef3ff;height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid rgba(124,92,255,.25)}
+.logo{font-size:17px;font-weight:800;letter-spacing:.2px;background:linear-gradient(90deg,#7c5cff,#00d4ff);-webkit-background-clip:text;background-clip:text;color:transparent}
+.status{font-size:12px;padding:4px 11px;border-radius:20px;background:rgba(74,222,128,.12);color:#4ade80;border:1px solid rgba(74,222,128,.35)}
+.status.busy{background:rgba(233,69,96,.12);color:#ff7b72;border-color:rgba(233,69,96,.4)}
+#runlbl{font-size:12px;color:#8a94ad;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:38%}
+main{flex:1;display:flex;min-height:0}
+aside{width:292px;border-right:1px solid rgba(124,92,255,.2);overflow-y:auto;padding:12px;background:rgba(7,10,22,.4)}
+.search input{width:100%;padding:8px 12px;border-radius:8px;border:1px solid rgba(124,92,255,.35);background:rgba(10,14,30,.7);color:#eef3ff;font-size:12px;outline:none}
+.gtitle{font-size:11px;color:#8a94ad;text-transform:uppercase;letter-spacing:.6px;padding:10px 8px 4px;font-weight:700}
+.tool{display:block;width:100%;text-align:left;background:transparent;border:0;color:#cfe0ff;padding:7px 10px;border-radius:7px;font-size:12.5px;cursor:pointer;transition:background .15s}
+.tool:hover{background:rgba(124,92,255,.2)}
+section{flex:1;display:flex;flex-direction:column;min-width:0;padding:16px 20px}
+.termbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.termbar .t{font-size:12px;color:#8a94ad}
+.termbar button{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.14);color:#eef3ff;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:12px}
+.termbar button:hover{background:#e94560;border-color:#e94560}
+#term{flex:1;overflow-y:auto;background:rgba(2,4,10,.9);border:1px solid rgba(124,92,255,.3);border-radius:12px;padding:14px;font:12.5px/1.6 Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+#term .out{color:#d7e2ff}#term .in{color:#7ee787;font-weight:600}#term .err{color:#ff7b72}#term .warn{color:#ffb45e}#term .tag{color:#8a94ad;font-style:italic}
+#term:empty::before{content:"Pick a tool on the left to run it. Output streams here live.";color:#5b6478;font-style:italic}
+.promptbar{display:none;align-items:center;gap:10px;margin-top:12px;background:rgba(10,14,30,.85);border:1px solid #7c5cff;border-radius:10px;padding:10px 14px}
+.promptbar.show{display:flex}
+.peek{background:rgba(74,222,128,.15);padding:2px 8px;border-radius:6px;font-size:11px;color:#7ee787}
+.promptbar .q{color:#93c5fd;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+.promptbar input{flex:1;background:transparent;border:0;border-bottom:1px solid rgba(124,92,255,.5);color:#eef3ff;padding:6px;font:12.5px Consolas,monospace;outline:none}
+.promptbar button{background:linear-gradient(90deg,#7c5cff,#00d4ff);border:0;color:#fff;padding:7px 16px;border-radius:8px;cursor:pointer;font-weight:700}
+::-webkit-scrollbar{width:8px;background:#0d0d1a}::-webkit-scrollbar-thumb{background:#3a2d6b;border-radius:4px}
+footer{text-align:center;padding:10px;color:#5b6478;font-size:11px;border-top:1px solid rgba(124,92,255,.15)}
 </style></head>
-<body><div class="wrap">
-<h1>Darkie TOOLS v4 — Web Dashboard</h1>
-<div class="sub">Click a module to run it. Output streams live below.</div>
-<div class="module-grid" id="modules"></div>
-<div class="toolbar"><h3 style="color:#00ccff;font-size:14px;">Output</h3><button class="clear-btn" onclick="clearOutput()">Clear</button></div>
-<pre id="output"></pre>
-<div class="footer">Darkie Security Suite v4 — educational use only</div>
-</div>
+<body>
+<header>
+  <div class="logo">&#9670; Darkie TOOLS v4 — Web Console</div>
+  <div class="status" id="status">idle</div>
+  <div id="runlbl"></div>
+  <div style="flex:1"></div>
+</header>
+<main>
+<aside>
+  <div class="gtitle">Search</div>
+  <input id="q" placeholder="Filter tools…" oninput="render()">
+  <div id="tree"></div>
+</aside>
+<section>
+  <div class="termbar"><div class="t">Output</div><button onclick="clearOut()">Clear</button></div>
+  <div id="term"></div>
+  <div class="promptbar" id="promptbar">
+    <div class="peek" id="peek">input</div>
+    <div class="q" id="pquestion"></div>
+    <input id="pinput" onkeydown="if(event.key==='Enter')sendAnswer()" autocomplete="off">
+    <button onclick="sendAnswer()">Send</button>
+  </div>
+</section>
+</main>
+<footer>Darkie TOOLS v4 — educational use only. Test only systems you own or have permission to test.</footer>
 <script>
-const modules=MODULES_PLACEHOLDER;
-const grid=document.getElementById('modules');
-modules.forEach(m=>{const b=document.createElement('button');b.className='module-btn';b.textContent=m.name;b.onclick=()=>runModule(m.id,b);grid.appendChild(b);});
-function runModule(id,btn){btn.classList.add('running');btn.disabled=true;const out=document.getElementById('output');out.innerHTML+='<span class="info">[+] Running '+id+'...</span>\\n';out.scrollTop=out.scrollHeight;fetch('/run/'+id).then(r=>r.json()).then(d=>{btn.classList.remove('running');btn.disabled=false;if(d.error)out.innerHTML+='<span class="error">[!] '+d.error+'</span>\\n';});}
-let lastLen=0;
-setInterval(()=>{fetch('/output').then(r=>r.json()).then(d=>{const out=document.getElementById('output');if(d.lines&&d.lines.length>lastLen){for(let i=lastLen;i<d.lines.length;i++){const cls=d.tags[i]||'info';out.innerHTML+='<span class="'+cls+'">'+escapeHtml(d.lines[i])+'</span>\\n';}lastLen=d.lines.length;out.scrollTop=out.scrollHeight;}});},300);
-function clearOutput(){document.getElementById('output').innerHTML='';fetch('/clear').then(r=>r.json());lastLen=0;}
-function escapeHtml(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+let tools=[];let pos=0;
+function setStatus(running){const s=document.getElementById('status');s.textContent=running?'busy':'idle';s.className='status'+(running?' busy':'');}
+async function loadTools(){const r=await fetch('/_data/tools');const d=await r.json();tools=d.tools;setStatus(d.running);render();}
+function render(){
+ const q=document.getElementById('q').value.toLowerCase();
+ const tree=document.getElementById('tree');tree.innerHTML='';
+ tools.forEach(g=>{
+   const items=g.items.filter(t=>t[0].toLowerCase().includes(q));
+   if(!items.length)return;
+   const d=document.createElement('div');
+   const t=document.createElement('div');t.className='gtitle';t.textContent=g.name;d.appendChild(t);
+   items.forEach(i=>{const b=document.createElement('button');b.className='tool';b.textContent=i[0];b.onclick=()=>runTool(i[1],i[0]);d.appendChild(b);});
+   tree.appendChild(d);
+ });
+}
+async function runTool(key,label){document.getElementById('runlbl').textContent=label;setStatus(true);await fetch('/_data/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tool:key,label})});}
+const term=document.getElementById('term');
+function addLine(tag,text){const el=document.createElement('div');el.className=tag;el.textContent=text||' ';term.appendChild(el);while(term.childNodes.length>6000)term.removeChild(term.firstChild);term.scrollTop=term.scrollHeight;}
+async function poll(){
+ const r=await fetch('/_data/poll?pos='+pos);const d=await r.json();
+ (d.lines||[]).forEach((t,i)=>addLine((d.tags||[])[i]||'out',t));
+ pos=d.pos;setStatus(d.running);
+ if(d.prompt){showPrompt(d.prompt);}else hidePrompt();
+ setTimeout(poll,240);
+}
+function showPrompt(text){const pb=document.getElementById('promptbar');if(!pb.classList.contains('show')){pb.classList.add('show');document.getElementById('pquestion').textContent=(text||'').trim();}document.getElementById('pinput').focus();}
+function hidePrompt(){document.getElementById('promptbar').classList.remove('show');}
+async function sendAnswer(){const inp=document.getElementById('pinput');await fetch('/_data/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:inp.value})});inp.value='';hidePrompt();}
+async function clearOut(){await fetch('/_data/clear',{method:'POST'});term.innerHTML='';pos=0;}
+loadTools();poll();
 </script>
 </body></html>"""
 
 
 def start_web_gui(host="127.0.0.1", port=5000):
-    """Run the clickable web dashboard in a browser."""
-    import builtins
-    import io as _io
+    """Run the web console (interactive tools + live output) in a browser."""
     try:
-        from flask import Flask, jsonify
+        from flask import Flask, jsonify, request
     except ImportError:
         print(f"  {RED}{SYM_X} Flask required. Install: pip install flask{RESET}")
         return
+    sess = InteractiveSession()
     app = Flask(__name__)
-    current_output = []
 
+    @app.route("/")
     def _index():
-        return _WEB_HTML.replace("MODULES_PLACEHOLDER", json.dumps(GUI_MODULES))
+        return _WEB_HTML
 
-    def _run_module(module_id):
-        func = globals().get(module_id)
-        if not func:
-            return jsonify({"error": f"Module {module_id} not found"})
+    @app.route("/_data/tools")
+    def _tools():
+        return jsonify({
+            "tools": [{"name": n, "items": items} for n, items in DASHBOARD_TOOLS],
+            "running": sess.running,
+        })
 
-        def wrapper():
-            old_out = sys.stdout
-            old_input = builtins.input
-            buf = _io.StringIO()
-            sys.stdout = buf
+    @app.route("/_data/run", methods=["POST"])
+    def _run():
+        data = request.get_json(force=True, silent=True) or {}
+        name = data.get("tool", "")
+        label = data.get("label", name)
+        ok = sess.start(name, label)
+        return jsonify({"ok": bool(ok), "running": sess.running})
 
-            def auto_input(prompt=""):
-                current_output.append(("warn", f"[prompt] {prompt}"))
-                return "b"
+    @app.route("/_data/poll")
+    def _poll():
+        p = request.args.get("pos", type=int, default=0)
+        lines, total = sess.snapshot(p)
+        return jsonify({
+            "lines": [t for _, t in lines],
+            "tags": [tag for tag, _ in lines],
+            "pos": total,
+            "running": sess.running,
+            "prompt": sess.wants_input(),
+        })
 
-            builtins.input = auto_input
-            try:
-                func()
-            except Exception as e:
-                print(f"Error: {e}")
-            finally:
-                builtins.input = old_input
-                sys.stdout = old_out
-                for line in buf.getvalue().splitlines():
-                    current_output.append(("info", line))
-            current_output.append(("info", f"[+] {module_id} completed"))
+    @app.route("/_data/answer", methods=["POST"])
+    def _answer():
+        data = request.get_json(force=True, silent=True) or {}
+        sess.answer(str(data.get("value", "")))
+        return jsonify({"ok": True})
 
-        threading.Thread(target=wrapper, daemon=True).start()
-        return jsonify({"status": "started"})
-
-    def _output():
-        lines = [l for _, l in current_output[-500:]]
-        tags = [t for t, _ in current_output[-500:]]
-        return jsonify({"lines": lines, "tags": tags})
-
+    @app.route("/_data/clear", methods=["POST"])
     def _clear():
-        current_output.clear()
-        return jsonify({"status": "ok"})
-
-    app.add_url_rule("/", "index", _index)
-    app.add_url_rule("/run/<module_id>", "run_module", _run_module)
-    app.add_url_rule("/output", "output", _output)
-    app.add_url_rule("/clear", "clear", _clear)
+        sess.stop()
+        sess._lines = []
+        sess._acc = ""
+        return jsonify({"ok": True})
 
     try:
         import webbrowser
         webbrowser.open(f"http://{host}:{port}")
     except Exception:
         pass
-    print(f"\n  {c('Web Dashboard started', GREEN)}")
+    print(f"\n  {c('Web Console started', GREEN)}")
     print(f"  {c('Open in your browser:', CYAN)} http://{host}:{port}")
     print(f"  {c('Press Ctrl+C to return.', YELLOW)}\n")
     try:
-        app.run(host=host, port=port, debug=False)
+        app.run(host=host, port=port, debug=False, use_reloader=False)
     except KeyboardInterrupt:
-        print(f"\n  {c('Web Dashboard stopped.', YELLOW)}")
+        print(f"\n  {c('Web Console stopped.', YELLOW)}")
 
 
 def start_desktop_gui():
-    """Run the clickable desktop app (tkinter)."""
+    """Run the desktop app (tkinter) with the full tool catalog."""
     try:
         import tkinter as tk
-        from tkinter import ttk, scrolledtext
+        from tkinter import ttk, scrolledtext, simpledialog
     except Exception:
         print(f"  {RED}{SYM_X} tkinter unavailable.{RESET}")
         print(f"  {YELLOW}Linux: sudo apt install python3-tk{RESET}")
         return
-    import builtins
-    import io as _io
-    from queue import Queue
 
     _BG = "#101a2e"
     _BG2 = "#0c1526"
-    _FG = "#35e0a0"
     _ACCENT = "#243b63"
+    _FG = "#35e0a0"
     _TEXT = "#e8eefb"
-    _ANSI = re.compile(r'\x1b\[[0-9;]*m')
 
-    def _strip(s):
-        return _ANSI.sub('', s)
-
-    class _Out(_io.StringIO):
-        def __init__(self, q):
-            super().__init__()
-            self.q = q
-
-        def write(self, s):
-            if s.strip():
-                self.q.put(_strip(s))
-            super().write(s)
-
-    class _Prompt:
+    class App:
         def __init__(self, root):
             self.root = root
-            self.result = None
-            self.ev = threading.Event()
-
-        def ask(self, prompt=""):
-            self.ev.clear()
-            self.result = None
-            self.root.after(0, self._show, prompt)
-            self.ev.wait()
-            return self.result
-
-        def _show(self, prompt):
-            from tkinter import simpledialog
-            self.result = simpledialog.askstring("Darkie Security Suite v4", prompt.strip() or "Input", parent=self.root)
-            self.ev.set()
-
-    class _App:
-        def __init__(self, root):
-            self.root = root
-            self.prompt = _Prompt(root)
-            self.lock = threading.Lock()
-            self.root.title("Darkie Security Suite v4")
-            self.root.geometry("1080x760")
+            self.sess = InteractiveSession()
+            self.pos = 0
+            self.prompt_open = False
+            self.keys = []
+            self.root.title("Darkie TOOLS v4")
+            self.root.geometry("1180x760")
             self.root.configure(bg=_BG)
             style = ttk.Style()
             style.theme_use("clam")
@@ -3561,112 +3740,156 @@ def start_desktop_gui():
             style.configure("TFrame", background=_BG)
             style.configure("TLabel", background=_BG, foreground=_TEXT)
             style.configure("TButton", background=_ACCENT, foreground=_TEXT, padding=[8, 4])
-            self.notebook = ttk.Notebook(root)
-            self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            self.tabs = {}
-            self.queues = {}
-            groups = [
-                ("Network", [("Capture", "net_capture"), ("Traffic", "net_traffic_monitor"), ("IDS", "net_ids"), ("ARP", "net_arp_detect")]),
-                ("Endpoint", [("Processes", "ep_process_monitor"), ("Suspicious", "ep_suspicious_processes"), ("Connections", "ep_network_connections")]),
-                ("Vuln", [("Port Scan", "vuln_advanced_scan"), ("CVE", "vuln_cve_lookup")]),
-                ("Pentest", [("SQLi", "pentest_sqli"), ("XSS", "pentest_xss")]),
-                ("OSINT", [("GeoIP", "osint_ipgeo"), ("DNS", "osint_dns"), ("Subdomains", "osint_subdomain"), ("Recon", "osint_recon_engine")]),
-                ("Hash", [("Generator", "hash_generator"), ("Cracker", "hash_cracker"), ("Passwords", "password_generator")]),
-                ("Console", None),
-            ]
-            for name, btns in groups:
-                frame = ttk.Frame(self.notebook)
-                self.notebook.add(frame, text=f" {name} ")
-                self.tabs[name] = frame
-                self.queues[name] = Queue()
-                self._build(frame, name, btns)
+            nb = ttk.Notebook(root)
+            nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            self.tools_tab = ttk.Frame(nb)
+            nb.add(self.tools_tab, text="  Tools  ")
+            self.console_tab = ttk.Frame(nb)
+            nb.add(self.console_tab, text="  Console  ")
+            self._build_tools()
+            self._build_console()
             self._poll()
 
-        def _output_widget(self, parent):
-            txt = scrolledtext.ScrolledText(parent, wrap=tk.WORD, height=10, bg=_BG2, fg=_TEXT,
-                                            insertbackground=_TEXT, font=("Consolas", 10), state=tk.DISABLED)
-            txt.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-            return txt
+        # ---------- Tools tab ----------
+        def _build_tools(self):
+            fr = ttk.Frame(self.tools_tab)
+            fr.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            left = ttk.Frame(fr)
+            left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
+            ttk.Label(left, text="Filter").pack(anchor="w")
+            self.svar = tk.StringVar()
+            e = ttk.Entry(left, textvariable=self.svar, width=26)
+            e.pack(fill=tk.X, pady=(2, 6))
+            e.bind("<KeyRelease>", lambda _: self._refill())
+            self.listbox = tk.Listbox(left, bg=_BG2, fg=_TEXT, selectbackground=_ACCENT,
+                                      selectforeground=_TEXT, highlightthickness=0, width=36,
+                                      font=("Segoe UI", 10), relief=tk.FLAT)
+            self.listbox.pack(fill=tk.BOTH, expand=True)
+            row = ttk.Frame(left)
+            row.pack(fill=tk.X, pady=(6, 0))
+            ttk.Button(row, text="Run", command=self._run_selected).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 3))
+            ttk.Button(row, text="Stop", command=self._stop).pack(side=tk.LEFT, expand=True, fill=tk.X)
+            self.status = ttk.Label(fr, text="Ready", foreground=_FG)
+            self.status.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+            right = ttk.Frame(fr)
+            right.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+            self.term = scrolledtext.ScrolledText(right, wrap=tk.WORD, bg=_BG2, fg=_TEXT,
+                                                  insertbackground=_TEXT, font=("Consolas", 10), state=tk.DISABLED)
+            self.term.pack(fill=tk.BOTH, expand=True)
+            for tag, color in (("out", "#d7e2ff"), ("in", _FG), ("err", "#ff7b72"),
+                               ("warn", "#ffb45e"), ("tag", "#8a94ad")):
+                self.term.tag_config(tag, foreground=color)
+            self.term.tag_config("in", font=("Consolas", 10, "bold"))
+            self.term.tag_config("tag", font=("Consolas", 10, "italic"))
+            self._refill()
 
-        def _build(self, parent, name, btns):
-            if btns is None:
-                self.console = self._output_widget(parent)
-                row = ttk.Frame(parent)
-                row.pack(fill=tk.X, padx=5)
-                self.cmd_var = tk.StringVar()
-                e = ttk.Entry(row, textvariable=self.cmd_var)
-                e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-                e.bind("<Return>", self._console_run)
-                ttk.Button(row, text="Run", command=self._console_run).pack(side=tk.RIGHT)
+        def _refill(self):
+            q = self.svar.get().lower()
+            self.listbox.delete(0, tk.END)
+            self.keys = []
+            for name, items in DASHBOARD_TOOLS:
+                self.listbox.insert(tk.END, f"  {name.upper()}")
+                self.listbox.itemconfig(tk.END, foreground="#8a94ad")
+                self.keys.append(None)
+                for label, key in items:
+                    if q and q not in label.lower():
+                        continue
+                    self.listbox.insert(tk.END, f"    {label}     [{key}]")
+                    self.keys.append((label, key))
+
+        def _run_selected(self):
+            sel = self.listbox.curselection()
+            if not sel or self.keys[sel[0]] is None:
                 return
-            row = ttk.Frame(parent)
-            row.pack(fill=tk.X, padx=5, pady=3)
-            for label, fn in btns:
-                ttk.Button(row, text=label, command=lambda n=name, f=fn: self._run_module(n, globals().get(f))).pack(side=tk.LEFT, padx=3)
-            self._output_widget(parent)
+            label, key = self.keys[sel[0]]
+            if self.sess.start(key, label):
+                self.status.config(text=f"Running: {label}", foreground="#ffb45e")
 
-        def _poll(self):
-            try:
-                for name, q in self.queues.items():
-                    while True:
-                        line = q.get_nowait()
-                        tab = self.tabs.get(name)
-                        if not tab:
-                            continue
-                        for child in tab.winfo_children():
-                            if isinstance(child, scrolledtext.ScrolledText):
-                                child.configure(state=tk.NORMAL)
-                                child.insert(tk.END, line + "\n")
-                                child.see(tk.END)
-                                child.configure(state=tk.DISABLED)
-            except Exception:
-                pass
-            self.root.after(100, self._poll)
+        def _stop(self):
+            self.sess.stop()
+            self.status.config(text="Stopped", foreground="#ff7b72")
 
-        def _run_module(self, name, func):
-            if func is None:
-                return
-            if not self.lock.acquire(blocking=False):
-                return
-            q = self.queues[name]
-            old_out = sys.stdout
-            old_input = builtins.input
-            sys.stdout = _Out(q)
-            builtins.input = self.prompt.ask
+        # ---------- Console tab ----------
+        def _build_console(self):
+            fr = ttk.Frame(self.console_tab)
+            fr.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+            self.cterm = scrolledtext.ScrolledText(fr, wrap=tk.WORD, bg=_BG2, fg=_TEXT,
+                                                   insertbackground=_TEXT, font=("Consolas", 10), state=tk.DISABLED)
+            self.cterm.pack(fill=tk.BOTH, expand=True)
+            row = ttk.Frame(fr)
+            row.pack(fill=tk.X, pady=(6, 0))
+            self.cmd_var = tk.StringVar()
+            e = ttk.Entry(row, textvariable=self.cmd_var)
+            e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            e.bind("<Return>", lambda _: self._console_run())
+            ttk.Button(row, text="Run", command=self._console_run).pack(side=tk.RIGHT)
 
-            def wrapper():
-                try:
-                    func()
-                except Exception as e:
-                    print(f"Error: {e}")
-                finally:
-                    builtins.input = old_input
-                    sys.stdout = old_out
-                    self.lock.release()
+        def _console_write(self, s):
+            def _do():
+                self.cterm.configure(state=tk.NORMAL)
+                self.cterm.insert(tk.END, s)
+                self.cterm.see(tk.END)
+                self.cterm.configure(state=tk.DISABLED)
+            self.root.after(0, _do)
 
-            threading.Thread(target=wrapper, daemon=True).start()
-
-        def _console_run(self, event=None):
+        def _console_run(self):
             cmd = self.cmd_var.get().strip()
             if not cmd:
                 return
             self.cmd_var.set("")
-            self.console.configure(state=tk.NORMAL)
-            self.console.insert(tk.END, f"> {cmd}\n")
-            self.console.configure(state=tk.DISABLED)
+            self._console_write(f"> {cmd}\n")
+            import sys as _sys
+            old_out = _sys.stdout
+
+            class _W:
+                def write(self, s):
+                    self.s = s
+                def flush(self):
+                    pass
+            w = _W()
 
             def run():
+                buf = []
+                old = _sys.stdout
+                import io as _io
+                f = _io.StringIO()
+                _sys.stdout = f
                 try:
                     exec(cmd, globals())
-                except Exception as e:
-                    self.console.configure(state=tk.NORMAL)
-                    self.console.insert(tk.END, f"Error: {e}\n")
-                    self.console.configure(state=tk.DISABLED)
-
+                except Exception as ex:
+                    print(f"Error: {ex}")
+                finally:
+                    _sys.stdout = old
+                self._console_write(f.getvalue())
             threading.Thread(target=run, daemon=True).start()
 
+        # ---------- main loop ----------
+        def _poll(self):
+            if not self.sess.running and self.status.cget("text") not in ("Ready",):
+                self.status.config(text="Ready", foreground=_FG)
+            lines, self.pos = self.sess.snapshot(self.pos)
+            if lines:
+                self.term.configure(state=tk.NORMAL)
+                for tag, text in lines:
+                    self.term.insert(tk.END, text + "\n", tag)
+                self.term.see(tk.END)
+                self.term.configure(state=tk.DISABLED)
+            if self.sess.wants_input() and not self.prompt_open:
+                self.prompt_open = True
+                self.root.after(0, self._ask_prompt)
+            self.root.after(120, self._poll)
+
+        def _ask_prompt(self):
+            prompt = self.sess.wants_input()
+            if prompt is None:
+                self.prompt_open = False
+                return
+            resp = simpledialog.askstring("Darkie TOOLS", (prompt or "Input:").strip(), parent=self.root)
+            self.sess.answer(resp if resp is not None else "")
+            self.prompt_open = False
+
     root = tk.Tk()
-    _App(root)
+    App(root)
     root.mainloop()
 
 
