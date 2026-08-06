@@ -52,7 +52,7 @@ need_cmd() {
 # immediately hits EOF ("EOF when reading a line").
 reattach_tty() {
     if [ -e /dev/tty ] && [ ! -t 0 ]; then
-        exec "$@" < /dev/tty 2>/dev/null || true
+        exec "$@" < /dev/tty || true
     fi
     exec "$@"
 }
