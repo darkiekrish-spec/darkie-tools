@@ -47,6 +47,16 @@ need_cmd() {
     if command -v "$1" >/dev/null 2>&1; then return 0; else return 1; fi
 }
 
+# Reattach stdin to the controlling terminal when launched via `curl | bash`.
+# Otherwise tool.py's input() reads from the already-consumed curl pipe and
+# immediately hits EOF ("EOF when reading a line").
+reattach_tty() {
+    if [ -e /dev/tty ] && [ ! -t 0 ]; then
+        exec "$@" < /dev/tty 2>/dev/null || true
+    fi
+    exec "$@"
+}
+
 usage() {
     cat <<EOF
 Darkie TOOLS v4 — Ultimate Cyber Toolkit (educational, own-account only)
@@ -93,7 +103,7 @@ else
     # Prefer a prebuilt binary when a release build exists (no Python needed)
     if download "$RAW_BASE/$VERSION/tool.AppImage" "$INSTALL_DIR/tool.AppImage"; then
         chmod +x "$INSTALL_DIR/tool.AppImage"
-        exec "$INSTALL_DIR/tool.AppImage" "$@"
+        reattach_tty "$INSTALL_DIR/tool.AppImage" "$@"
     fi
     echo "==> Downloading Darkie TOOLS $VERSION ..."
     if ! download "$RAW_BASE/$VERSION/tool.py" "$INSTALL_DIR/tool.py"; then
@@ -159,4 +169,4 @@ for a in "$@"; do
     esac
 done
 
-exec "$PY" "$TOOL_PY" "${ARGS[@]}"
+reattach_tty "$PY" "$TOOL_PY" "${ARGS[@]}"
