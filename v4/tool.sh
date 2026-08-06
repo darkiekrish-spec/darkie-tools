@@ -150,12 +150,19 @@ fi
 if [ "$INSTALL_MODE" = "1" ]; then
     if [ -n "$LOCAL_DIR" ] && [ "$LOCAL_DIR" != "$INSTALL_DIR" ]; then
         cp "$LOCAL_DIR/tool.py" "$INSTALL_DIR/tool.py"
+        cp -f "$LOCAL_DIR/tool.sh" "$INSTALL_DIR/tool.sh" 2>/dev/null || true
         cp -f "$LOCAL_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt" 2>/dev/null || true
     fi
     TOOL_PY="$INSTALL_DIR/tool.py"
+    # Keep a copy of this launcher so `darkie-tools --update` works later
+    VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v4"
+    if [ ! -f "$INSTALL_DIR/tool.sh" ]; then
+        download "$RAW_BASE/$VERSION/tool.sh" "$INSTALL_DIR/tool.sh" || true
+    fi
+    chmod +x "$INSTALL_DIR/tool.sh" 2>/dev/null || true
     cat > "$INSTALL_DIR/darkie-tools" <<EOS
 #!/usr/bin/env bash
-exec env DARKIE_AUTOINSTALL=1 "$PY" "$INSTALL_DIR/tool.py" "\$@"
+exec bash "$INSTALL_DIR/tool.sh" "\$@"
 EOS
     chmod +x "$INSTALL_DIR/darkie-tools"
     if need_cmd sudo && sudo -n true 2>/dev/null; then

@@ -68,7 +68,35 @@ echo "==> Darkie TOOLS — detecting newest version from repo ..."
 VERSION="$(latest_version)"
 [ -n "$VERSION" ] && [ "$VERSION" != "v0" ] || VERSION="v4"
 echo "==> Newest version detected: $VERSION"
-echo "==> Launching $VERSION installer ..."
+echo ""
 
-# Stream that version's own launcher with any extra args passed through.
-download_stdout "$RAW_PREFIX/$VERSION/tool.sh" | bash -s -- "$@"
+# Ask the user how they want to use it (skipped when a flag is given).
+MODE_ARGS=()
+case "$1" in
+    --install|-i)          echo "==> Installing Darkie TOOLS on your system ..."; MODE_ARGS=(--install); shift ;;
+    --live|--run|-r)       echo "==> Running Darkie TOOLS live (no install) ..."; shift ;;
+    *)
+        if [ -t 0 ]; then
+            echo "How do you want to use Darkie TOOLS?"
+            echo "  1) Run live        — just launch it now, nothing installed"
+            echo "  2) Install system  — adds a global \`darkie-tools\` command"
+            printf 'Choose (1/2) [1]: '
+            read -r ANS
+        else
+            # Piped via curl|bash; reopen the real terminal for the prompt.
+            printf 'How do you want to use Darkie TOOLS? (1=live, 2=install) [1]: ' >/dev/tty 2>/dev/null || true
+            read -r ANS </dev/tty 2>/dev/null || ANS="1"
+        fi
+        case "$ANS" in
+            2|[Ii]|[Ii]nstall) echo "    Installing on your system — after it finishes, run \`darkie-tools\` from anywhere."
+                               MODE_ARGS=(--install) ;;
+            *)                 echo "    Running live. To install later: curl -fsSL https://darkifolio.vercel.app/darkie-tool/install | bash -s -- --install" ;;
+        esac
+        ;;
+esac
+
+echo ""
+echo "==> Launching $VERSION ..."
+
+# Stream that version's own launcher with any install flags passed through.
+download_stdout "$RAW_PREFIX/$VERSION/tool.sh" | bash -s -- "${MODE_ARGS[@]}" "$@"
