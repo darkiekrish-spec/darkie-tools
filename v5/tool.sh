@@ -21,6 +21,7 @@ RAW_BASE="https://raw.githubusercontent.com/darkiekrish-spec/darkie-tools/main"
 INSTALL_DIR="${DARKIE_TOOLS_HOME:-$HOME/.darkie-tools}"
 INSTALL_MODE="0"
 UPDATE_MODE="0"
+UNINSTALL_MODE="0"
 
 # v_gt A B -> exit 0 (true) if numeric dotted version A > B
 v_gt() {
@@ -94,6 +95,7 @@ USAGE
   ./tool.sh --host 0.0.0.0 --web   share the dashboard over your network
   ./tool.sh --install     install dependencies and add a global \`darkie-tools\` command
   ./tool.sh --update      download the newest version and update your local copy
+  ./tool.sh --uninstall   remove darkie-tools and its installed files
 
 On first run, missing system tools and Python packages are installed
 automatically (may ask for your sudo/admin password). Python 3 is required.
@@ -106,6 +108,7 @@ for a in "$@"; do
         -h|--help) usage ;;
         --install) INSTALL_MODE="1" ;;
         -u|--update|-update) UPDATE_MODE="1" ;;
+        --uninstall) UNINSTALL_MODE="1" ;;
     esac
 done
 
@@ -114,6 +117,42 @@ if [ -n "${BASH_SOURCE[0]:-}" ] && [ "$0" != "bash" ]; then
     LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 else
     LOCAL_DIR=""
+fi
+
+# 0) Uninstall: remove the global command + installed copy (no network needed).
+#    Keeps ~/.darkie-tools unless the user explicitly wants it fully gone.
+if [ "$UNINSTALL_MODE" = "1" ]; then
+    echo ""
+    echo "  Darkie TOOLS $VERSION — Uninstall"
+    echo "  ---------------------------------------------------------"
+    echo "  This will remove:"
+    echo "    • the global \`darkie-tools\` command (if installed)"
+    echo "    • ~/.darkie-tools (the installed copy, incl. wordlists)"
+    echo ""
+    if [ -t 0 ]; then
+        read -r -p "  Remove everything? [y/N] " ans
+    else
+        ans=""
+    fi
+    if [[ "$ans" != "y" && "$ans" != "Y" && "$ans" != "yes" && "$ans" != "YES" ]]; then
+        echo "  Uninstall cancelled."
+        exit 0
+    fi
+    for link in /usr/local/bin/darkie-tools "$HOME/.local/bin/darkie-tools"; do
+        if [ -e "$link" ] || [ -L "$link" ]; then
+            if [ -w "$(dirname "$link")" ]; then
+                rm -f "$link" && echo "  Removed $link"
+            elif need_cmd sudo; then
+                sudo rm -f "$link" && echo "  Removed $link (via sudo)"
+            fi
+        fi
+    done
+    if [ -d "$INSTALL_DIR" ]; then
+        rm -rf "$INSTALL_DIR"
+        echo "  Removed $INSTALL_DIR"
+    fi
+    echo "  Darkie TOOLS uninstalled. Goodbye!"
+    exit 0
 fi
 
 # Compare dotted versions: a >= b -> exit 0
@@ -276,7 +315,7 @@ fi
 ARGS=()
 for a in "$@"; do
     case "$a" in
-        --install|-u|--update|-update) ;;
+        --install|-u|--update|-update|--uninstall) ;;
         *) ARGS+=("$a") ;;
     esac
 done
