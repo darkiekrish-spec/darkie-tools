@@ -2216,7 +2216,7 @@ def menu_telephone():
     _menu_loop("telephone", "Telephone Tools", [
         ("1", "Analyze Number", tel_analyze),
         ("2", "Format Number", tel_format),
-        ("3", "Country Codes", lambda: [print(f"  {c(f'+{c}', GREEN):8s} {country}") for c, country in sorted(COUNTRY_CODES.items(), key=lambda x: int(x[0]))]),
+        ("3", "Country Codes", lambda: [print(f"  {c(f'+{code}', GREEN):8s} {country}") for code, country in sorted(COUNTRY_CODES.items(), key=lambda x: int(x[0]))]),
         ("b", "Back to main menu", None),
     ], MAGENTA)
 
@@ -3985,10 +3985,10 @@ def menu_native():
 def _native_list_all(found):
     header_box("All detected native tools", GREEN)
     by_cat = {}
-    for name, c, desc, example, root in _native_catalog():
-        by_cat.setdefault(c, []).append((name, desc, example, root))
-    for c, (cat_name, _) in enumerate(NATIVE_CATS):
-        items = by_cat.get(c, [])
+    for name, cat_num, desc, example, root in _native_catalog():
+        by_cat.setdefault(cat_num, []).append((name, desc, example, root))
+    for cat_idx, (cat_name, _) in enumerate(NATIVE_CATS):
+        items = by_cat.get(cat_idx, [])
         if not items:
             continue
         print(f"\n  {c(cat_name.upper(), GREEN)}")
@@ -4002,7 +4002,8 @@ def _native_list_all(found):
 
 
 def _native_pick(found, tools, cat_name):
-    handlers = {name: (name, desc, example, root) for name, desc, example, root in tools}
+    # tools are (name, description, example, root). Launch needs (tool, root, example).
+    handlers = {name: (name, root, example) for name, desc, example, root in tools}
     items = [(name, desc, example, root) for name, desc, example, root in tools]
     while True:
         header_box(f"Native Toolbox — {cat_name}", GREEN)
