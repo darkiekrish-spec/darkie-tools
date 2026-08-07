@@ -71,7 +71,7 @@ and dependencies auto-install on first launch.
 
 | Version | Directory | Description |
 |---------|-----------|-------------|
-| **v5** | `v5/` | **Latest** — All v4 features + **Native Toolbox** that detects & launches the security tools already on your OS (Kali/Parrot/...) ready-to-use. 18 modules |
+| **v5** | `v5/` | **Latest** — All v4 features + **Native Toolbox** with per-OS auto-install (apt/dnf/pacman/brew/choco/winget/pip) so it works on Kali, Ubuntu, Fedora, Arch, macOS & Windows. Stuck-v4 cached copies auto-upgrade to v5. 18 modules |
 | **v4** | `v4/` | Full rewrite, 17 modules, argparse CLI, web + desktop GUIs |
 | v3 | `v3/` | Multi-OS, 16 modules, auto-dependency installer, animated UI |
 | v2.2 | `v2.2/` | Refined v2 with full 16 modules and auto-dependency installer |
@@ -102,7 +102,7 @@ and dependencies auto-install on first launch.
 | 15 | WiFi & Wireless | WiFi scanner, security audit (with legal warning) |
 | 16 | Report Generator | HTML report, JSON/CSV export of session findings |
 | 17 | Graphical Interfaces | Web Dashboard + Desktop (tkinter) GUI |
-| 18 | **Native Toolbox** | **Auto-detects the security tools installed on your OS (nmap, sqlmap, hydra, hashcat, msfconsole, aircrack-ng, ...) and launches them ready-to-use — with sudo handled automatically** |
+| 18 | **Native Toolbox** | **Auto-detects the security tools installed on your OS (nmap, sqlmap, hydra, hashcat, msfconsole, aircrack-ng, ...) and launches them ready-to-use — with sudo handled automatically. Press `i` to auto-install every missing tool on your OS (apt/dnf/pacman/brew/choco/winget/pip), or it offers to install a tool when you launch one that's missing.** |
 
 ## Requirements
 
