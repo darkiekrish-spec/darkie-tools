@@ -2526,10 +2526,25 @@ def hash_cracker():
     target = _get("Hash to crack")
     if not target:
         return
-    algo = _get("Algorithm (md5/sha1/sha256/sha512)", "md5").lower()
-    if algo not in ("md5", "sha1", "sha224", "sha256", "sha384", "sha512"):
-        print(f"  {RED}{SYM_X} Invalid algorithm.{RESET}")
+    algo = _get("Algorithm (md5/sha1/sha224/sha256/sha384/sha512/bcrypt)", "md5").lower().strip()
+    # Auto-detect bcrypt: any $2a/$2b/$2y/$2x hash MUST use bcrypt (never md5 default)
+    if target.startswith("$2"):
+        algo = "bcrypt"
+        print(f"  {c('Detected bcrypt hash ($2...).', CYAN)}")
+    supported = ("md5", "sha1", "sha224", "sha256", "sha384", "sha512", "bcrypt")
+    if algo not in supported:
+        print(f"  {RED}{SYM_X} Invalid algorithm (supported: {', '.join(supported)}).{RESET}")
         return
+    # Import bcrypt lazily only when needed (keeps startup fast)
+    if algo == "bcrypt":
+        try:
+            import bcrypt as _bcrypt
+        except ImportError:
+            print(f"  {RED}{SYM_X} Need 'bcrypt' module. Install: pip install bcrypt{RESET}")
+            return
+        if not target.startswith("$2"):
+            print(f"  {RED}{SYM_X} A bcrypt hash must start with $2b$/$2y$/$2a$/{RESET}")
+            return
     print(f"  {DIM}Wordlists to try: big leaked DB + smart guess (name+number combos).{RESET}")
     seed = _get("A name to guess from (e.g. your nickname)", "").strip()
 
@@ -2543,23 +2558,32 @@ def hash_cracker():
         nonlocal words_done, found
         words_done += 1
         try:
-            h = hashlib.new(algo)
-            h.update(word.encode())
-            if h.hexdigest().lower() == target.lower():
-                print(f"\n  {RED}{SYM_WARN} CRACKED: {c(word, RED)}{RESET}")
-                add_log_alert("HIGH", "HashCrack", f"Cracked {algo}: {word}")
-                found = True
-                return True
+            if algo == "bcrypt":
+                # bcrypt is salted+randomized — must use checkpw, never compare hashes
+                if _bcrypt.checkpw(word.encode(), target.encode()):
+                    print(f"\n  {RED}{SYM_WARN} CRACKED: {c(word, RED)} (bcrypt){RESET}")
+                    add_log_alert("HIGH", "HashCrack", f"Cracked bcrypt: {word}")
+                    found = True
+                    return True
+            else:
+                h = hashlib.new(algo)
+                h.update(word.encode())
+                if h.hexdigest().lower() == target.lower():
+                    print(f"\n  {RED}{SYM_WARN} CRACKED: {c(word, RED)} ({algo}){RESET}")
+                    add_log_alert("HIGH", "HashCrack", f"Cracked {algo}: {word}")
+                    found = True
+                    return True
         except Exception:
             pass
         return False
 
-    # Fast path: verify the hash format first
-    try:
-        hashlib.new(algo).update(b"test")
-    except ValueError:
-        print(f"  {RED}{SYM_X} Invalid algorithm.{RESET}")
-        return
+    # Fast path: verify the hash format first (bcrypt handled separately)
+    if algo != "bcrypt":
+        try:
+            hashlib.new(algo).update(b"test")
+        except ValueError:
+            print(f"  {RED}{SYM_X} Invalid algorithm.{RESET}")
+            return
 
     if wl:
         print(f"  {c(f'Cracking against {os.path.basename(wl)} ...', CYAN)}")
