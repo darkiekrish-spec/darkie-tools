@@ -188,6 +188,8 @@ if [ "$NEED_DL" = "1" ]; then
     fi
     download "$RAW_BASE/$VERSION/requirements.txt" "$INSTALL_DIR/requirements.txt" || true
     download "$RAW_BASE/$VERSION/mc_bots.js" "$INSTALL_DIR/mc_bots.js" || true
+    # Ship the bundled 14M-password rockyou wordlist (cracker DB)
+    download "$RAW_BASE/$VERSION/wordlists/rockyou.txt.gz" "$INSTALL_DIR/wordlists/rockyou.txt.gz" || true
     # Refresh the stored launcher AFTER tool.py exits (can't overwrite the
     # currently-executing file mid-run — it would corrupt bash).
     REFRESH_LAUNCHER="1"

@@ -2324,19 +2324,183 @@ def hash_identifier():
     print()
 
 
+# ══════════════════════════════════════════════════════
+#  WORDLISTS (real leaked / dictionary DBs for legit testing)
+# ══════════════════════════════════════════════════════
+
+WORDLIST_DIR = os.path.join(os.path.expanduser("~/.darkie-tools"), "wordlists")
+
+# Real-world leaked / corpus wordlists (legal to download, use only on systems
+# you own / have permission to test).  rockyou.txt is the famous 14M-entry leak.
+WORDLIST_SOURCES = {
+    "rockyou (14M leaked)": "https://github.com/brannondorsey/naive-hashcat/releases/download/data/rockyou.txt",
+    "top-1M probable": "https://raw.githubusercontent.com/berzerk0/Probable-Wordlists/master/Real-Passwords/Top1Thousand-probable-v2.txt",
+    "SecLists common": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Common-Credentials/10-million-password-list-top-10000.txt",
+    "SecLists realistic": "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Passwords/Realistic-Passwords/Realistic-Passwords-3.txt",
+}
+
+
+def _system_wordlists():
+    """Return every big wordlist file we can find on the system + our dir."""
+    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wordlists")
+    candidates = [
+        os.path.join(WORDLIST_DIR, "rockyou.txt"),
+        os.path.join(WORDLIST_DIR, "rockyou.txt.gz"),
+        os.path.join(WORDLIST_DIR, "wordlist.txt"),
+        os.path.join(bundled, "rockyou.txt"),
+        os.path.join(bundled, "rockyou.txt.gz"),
+        "/usr/share/wordlists/rockyou.txt",
+        "/usr/share/wordlists/rockyou.txt.gz",
+        "/usr/share/wordlists/fasttrack.txt",
+        "/usr/share/wordlists/nmap.lst",
+        "/usr/share/john/password.lst",
+    ]
+    return [p for p in candidates if os.path.exists(p)]
+
+
+def _prepare_rockyou():
+    """Extract a rockyou.txt.gz (bundled or system) into our wordlist dir."""
+    out = os.path.join(WORDLIST_DIR, "rockyou.txt")
+    if os.path.exists(out):
+        return out
+    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)), "wordlists", "rockyou.txt.gz")
+    gz = bundled if os.path.exists(bundled) else os.path.join(WORDLIST_DIR, "rockyou.txt.gz")
+    if not os.path.exists(gz):
+        gz = "/usr/share/wordlists/rockyou.txt.gz"
+    if os.path.exists(gz):
+        print(f"  {c('Found compressed rockyou.txt.gz — extracting (14M passwords)...', CYAN)}")
+        try:
+            import gzip
+            with gzip.open(gz, "rb") as fin, open(out, "wb") as fout:
+                while True:
+                    chunk = fin.read(1 << 20)
+                    if not chunk:
+                        break
+                    fout.write(chunk)
+            return out
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Could not extract: {e}{RESET}")
+    return None
+
+
+def _pick_wordlist():
+    """Let the user choose a wordlist (auto-decompress rockyou if present)."""
+    os.makedirs(WORDLIST_DIR, exist_ok=True)
+    _prepare_rockyou()
+    found = _system_wordlists()
+    if not found:
+        print(f"  {YELLOW}No wordlists found. Use the Wordlist Manager to download one.{RESET}")
+        return None
+    print(f"\n  {c('Available wordlists:', GREEN)}")
+    for i, p in enumerate(found, start=1):
+        size = os.path.getsize(p)
+        if size > 0:
+            from math import log10
+            mb = size / (1024 * 1024)
+            print(f"  {c(f'[{i}]', CYAN)}  {p}  {DIM}({mb:.1f} MB){RESET}")
+    ch = input(f"\n  {c(f'Pick wordlist (1-{len(found)}, Enter=best) {SYM_PROMPT} ', CYAN)}").strip()
+    if ch.isdigit() and 1 <= int(ch) <= len(found):
+        return found[int(ch) - 1]
+    # Default to the biggest (best coverage) = rockyou if present, else first
+    return max(found, key=os.path.getsize)
+
+
+def download_wordlist():
+    """Download a real leaked/realistic wordlist into ~/.darkie-tools/wordlists."""
+    header_box("Wordlist Manager — Download", CYAN)
+    os.makedirs(WORDLIST_DIR, exist_ok=True)
+    print(f"\n  {c('Pick a wordlist to download (real leaked/realistic passwords):', GREEN)}")
+    names = list(WORDLIST_SOURCES)
+    for i, n in enumerate(names, start=1):
+        print(f"  {c(f'[{i}]', CYAN)}  {n}")
+    ch = input(f"\n  {c(f'Choice (1-{len(names)}) {SYM_PROMPT} ', CYAN)}").strip()
+    if not ch.isdigit() or not (1 <= int(ch) <= len(names)):
+        return
+    name = names[int(ch) - 1]
+    url = WORDLIST_SOURCES[name]
+    fname = name.split(" ")[0] + ".txt"
+    out = os.path.join(WORDLIST_DIR, fname.replace("(", "").replace(")", ""))
+    print(f"  {c(f'Downloading {name} ...', CYAN)}")
+    try:
+        r = requests.get(url, stream=True, timeout=120)
+        r.raise_for_status()
+        total = int(r.headers.get("Content-Length", 0))
+        done = 0
+        with open(out, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1 << 16):
+                f.write(chunk)
+                done += len(chunk)
+                if total and done % (1 << 20) == 0:
+                    print(f"  {c(f'  {done//(1<<20)} MB...', DIM)}", end="\r")
+        print(f"\n  {GREEN}{SYM_CHECK} Saved to {c(out, CYAN)} ({os.path.getsize(out)//(1024*1024)} MB){RESET}")
+        add_log_alert("INFO", "Wordlists", f"Downloaded {name}")
+    except Exception as e:
+        print(f"  {RED}{SYM_X} Download failed: {e}{RESET}")
+    print()
+
+
+# ── Smart password guessing: numbers + names + years + symbols ──────────────
+_SMART_BASES = ["krish", "admin", "root", "password", "user", "test", "login", "kali",
+                "darkie", "dragon", "monkey", "shadow", "master", "welcome", "iloveyou"]
+_SMART_SUFFIX = ["1", "12", "123", "1234", "12345", "123456", "0", "00", "000",
+                 "1!", "12!", "123!", "1234!", "12345!", "@", "!", "#", "007", "69", "2024", "2025", "2026", "90", "0101"]
+_SMART_PREFIX = ["1", "12", "123", "1234", "12345", "123456", "0", "00", "007", "@", "!", "#", "20", "2024", "2025", "2026"]
+
+
+def _smart_guess_words(seed):
+    """Generate name+number / number+name / leet combos from a seed name."""
+    seen, out = set(), []
+    bases = [seed] + _SMART_BASES if seed else _SMART_BASES
+    for b in bases:
+        b = b.strip().lower()
+        if not b:
+            continue
+        for w in [b, b.capitalize(), b.upper()]:
+            if w not in seen:
+                seen.add(w); out.append(w)
+        for s in _SMART_SUFFIX:
+            w = b + s
+            if w not in seen:
+                seen.add(w); out.append(w)
+            w2 = b.capitalize() + s
+            if w2 not in seen:
+                seen.add(w2); out.append(w2)
+        for p in _SMART_PREFIX:
+            w = p + b
+            if w not in seen:
+                seen.add(w); out.append(w)
+        # leet
+        leet = b.replace("a", "4").replace("e", "3").replace("i", "1").replace("o", "0").replace("s", "5")
+        if leet not in seen:
+            seen.add(leet); out.append(leet)
+            for s in _SMART_SUFFIX[:12]:
+                w = leet + s
+                if w not in seen:
+                    seen.add(w); out.append(w)
+    return out
+
+
 def hash_cracker():
-    header_box("Hash Cracker (Dictionary)", CYAN)
+    header_box("Hash Cracker (Dictionary + Smart Guess)", CYAN)
     target = _get("Hash to crack")
     if not target:
         return
-    algo = _get("Algorithm (md5/sha1/sha256)", "md5").lower()
-    wordlist = ["password", "123456", "admin", "root", "test", "letmein", "welcome", "qwerty",
-                "abc123", "password1", "monkey", "dragon", "master", "passw0rd", "shadow",
-                "12345", "iloveyou", "sunshine", "princess", "football", "login", "hello",
-                "trustno1", "batman", "access", "admin123", "root123", "changeme", "default"]
-    print(f"  {c(f'Cracking {len(wordlist)} words against {algo.upper()}...', CYAN)}")
+    algo = _get("Algorithm (md5/sha1/sha256/sha512)", "md5").lower()
+    if algo not in ("md5", "sha1", "sha224", "sha256", "sha384", "sha512"):
+        print(f"  {RED}{SYM_X} Invalid algorithm.{RESET}")
+        return
+    print(f"  {DIM}Wordlists to try: big leaked DB + smart guess (name+number combos).{RESET}")
+    seed = _get("A name to guess from (e.g. your nickname)", "").strip()
+
+    # 1) Big dictionary wordlist (auto-pick biggest available / decompress rockyou)
+    wl = _pick_wordlist()
+    words_done = 0
     found = False
-    for word in wordlist:
+    start = time.time()
+
+    def _check(word):
+        nonlocal words_done, found
+        words_done += 1
         try:
             h = hashlib.new(algo)
             h.update(word.encode())
@@ -2344,12 +2508,47 @@ def hash_cracker():
                 print(f"\n  {RED}{SYM_WARN} CRACKED: {c(word, RED)}{RESET}")
                 add_log_alert("HIGH", "HashCrack", f"Cracked {algo}: {word}")
                 found = True
-                break
-        except ValueError:
-            print(f"  {RED}{SYM_X} Invalid algorithm.{RESET}")
-            return
+                return True
+        except Exception:
+            pass
+        return False
+
+    # Fast path: verify the hash format first
+    try:
+        hashlib.new(algo).update(b"test")
+    except ValueError:
+        print(f"  {RED}{SYM_X} Invalid algorithm.{RESET}")
+        return
+
+    if wl:
+        print(f"  {c(f'Cracking against {os.path.basename(wl)} ...', CYAN)}")
+        try:
+            with open(wl, "r", encoding="latin-1", errors="ignore") as f:
+                for line in f:
+                    w = line.strip()
+                    if w and _check(w):
+                        break
+                    if words_done % 200000 == 0 and not found:
+                        el = max(1, int(time.time() - start))
+                        print(f"  {DIM}{words_done:,} tried ({el}s) — still working...{RESET}", end="\r")
+            print()
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error reading wordlist: {e}{RESET}")
+    else:
+        print(f"  {YELLOW}No wordlist file — trying smart guess only.{RESET}")
+
+    # 2) Smart guess (name + numbers + years) — catches things like "1234krish"
     if not found:
-        print(f"  {GREEN}{SYM_CHECK} Not found in dictionary.{RESET}")
+        print(f"  {c('Trying smart guess patterns (name + numbers)...', MAGENTA)}")
+        for w in _smart_guess_words(seed):
+            if _check(w):
+                break
+
+    print()
+    if not found:
+        print(f"  {GREEN}{SYM_CHECK} Not cracked. Try: a bigger wordlist, a rule-based tool (hashcat/john), or a different algorithm.{RESET}")
+    else:
+        print(f"  {c(f'Cracked in {int(time.time()-start)}s after {words_done:,} guesses.', DIM)}")
     print()
 
 
@@ -2410,6 +2609,7 @@ def menu_hash_crypto():
         ("3", "Hash Cracker", hash_cracker),
         ("4", "Encoder / Decoder", encoder_decoder),
         ("5", "Password Generator", password_generator),
+        ("6", "Wordlist Manager (download leaked DBs)", download_wordlist),
         ("b", "Back to main menu", None),
     ], CYAN)
 
