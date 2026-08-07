@@ -249,10 +249,21 @@ if [ "$INSTALL_MODE" = "1" ]; then
 exec bash "$INSTALL_DIR/tool.sh" "\$@"
 EOS
     chmod +x "$INSTALL_DIR/darkie-tools"
-    if need_cmd sudo && sudo -n true 2>/dev/null; then
-        sudo ln -sf "$INSTALL_DIR/darkie-tools" /usr/local/bin/darkie-tools
-    elif [ -w /usr/local/bin ]; then
+    if [ -w /usr/local/bin ]; then
         ln -sf "$INSTALL_DIR/darkie-tools" /usr/local/bin/darkie-tools
+    elif need_cmd sudo && sudo -n true 2>/dev/null; then
+        sudo ln -sf "$INSTALL_DIR/darkie-tools" /usr/local/bin/darkie-tools
+    elif need_cmd sudo; then
+        # Interactive: prompt for the sudo password right here so the global
+        # `darkie-tools` command also works after `sudo su` / as root.
+        if sudo -v 2>/dev/null && sudo ln -sf "$INSTALL_DIR/darkie-tools" /usr/local/bin/darkie-tools; then
+            :
+        else
+            echo "  No access to /usr/local/bin. Linking into ~/.local/bin instead."
+            mkdir -p "$HOME/.local/bin"
+            ln -sf "$INSTALL_DIR/darkie-tools" "$HOME/.local/bin/darkie-tools"
+            echo "  Added ~/.local/bin/darkie-tools — add ~/.local/bin to your PATH if needed."
+        fi
     else
         mkdir -p "$HOME/.local/bin"
         ln -sf "$INSTALL_DIR/darkie-tools" "$HOME/.local/bin/darkie-tools"

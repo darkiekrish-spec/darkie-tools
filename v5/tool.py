@@ -323,6 +323,37 @@ def _check_root(require_scapy=False):
     return True
 
 
+def _ensure_root(feature, *answers):
+    """If root, return True. If not root, offer to re-run this feature under sudo
+    right now (the terminal will ask for your password) and then continue. Returns
+    True only inside the elevated re-run, False if we shouldn't proceed
+    (user declined, no sudo, or a new elevated process is now running)."""
+    if _is_root():
+        return True
+    if platform.system().lower() == "windows":
+        print(f"  {RED}This feature needs admin rights. Re-run this terminal as Administrator.{RESET}")
+        return False
+    if not _which("sudo"):
+        print(f"  {RED}sudo not available. Re-run as root (e.g. sudo python3 tool.py).{RESET}")
+        return False
+    print(f"\n  {YELLOW}{SYM_WARN} This feature needs root privileges to capture raw packets.{RESET}")
+    if not _yes("Re-run this feature with sudo now? (you may be asked for your password)"):
+        return False
+    # Re-exec the whole tool under sudo running just this feature with the
+    # answers the user already gave. The terminal prompts for the password here.
+    script = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else os.path.abspath(__file__)
+    cmd = [_which("sudo"), sys.executable, script, "--run", feature]
+    if answers:
+        cmd += [str(a) for a in answers]
+    print(f"  {c('Elevating: ' + ' '.join(cmd) + ' ...', CYAN)}\n")
+    try:
+        os.execv(_which("sudo"), cmd)  # replaces this process; password prompt appears
+    except Exception as e:
+        print(f"  {RED}{SYM_X} Could not elevate: {e}{RESET}")
+        return False
+    return False
+
+
 # ══════════════════════════════════════════════════════
 #  MODULE 1: NETWORK & THREAT MONITORING
 # ══════════════════════════════════════════════════════
@@ -350,7 +381,8 @@ def _detect_interfaces():
 
 def net_capture():
     header_box("Packet Capture & Analysis", RED)
-    if not _check_root(require_scapy=True):
+    if not HAS_SCAPY:
+        print(f"  {YELLOW}scapy not installed — install with: pip install scapy{RESET}")
         return
     ifaces = _detect_interfaces()
     if len(ifaces) > 1:
@@ -362,6 +394,8 @@ def net_capture():
     else:
         iface = ifaces[0] if ifaces else "eth0"
     count = _get_int("Packets to capture", 50)
+    if not _ensure_root("net_capture", iface, count):
+        return
     print(f"\n  {c(f'Capturing {count} packets on {iface}... Ctrl+C to stop', RED)}")
     print(f"  {c(SYM_LINE_H*50, CYAN)}")
     captured = 0
@@ -421,9 +455,12 @@ def net_traffic_monitor():
 
 def net_ids():
     header_box("IDS Signature Detection", RED)
-    if not _check_root(require_scapy=True):
+    if not HAS_SCAPY:
+        print(f"  {YELLOW}scapy not installed — install with: pip install scapy{RESET}")
         return
     dur = _get_int("Monitor duration (seconds)", 15)
+    if not _ensure_root("net_ids", dur):
+        return
     sigs = 0
     patterns = {
         "SQLi": re.compile(rb"(union\s+select|or\s+1=1|'--)", re.I),
@@ -456,12 +493,15 @@ def net_ids():
 
 def net_arp_detect():
     header_box("ARP Spoofing Detector", RED)
-    if not _check_root(require_scapy=True):
+    if not HAS_SCAPY:
+        print(f"  {YELLOW}scapy not installed — install with: pip install scapy{RESET}")
         return
     if not _which("ip") and platform.system().lower() != "windows":
         print(f"  {YELLOW}ip command required.{RESET}")
         return
-    print(f"  {c('Watching for ARP inconsistencies (Ctrl+C to stop)...', CYAN)}")
+    print(f"  {c('Watching for ARP inconsistencies (needs root) — Ctrl+C to stop...', CYAN)}")
+    if not _ensure_root("net_arp_detect"):
+        return
     seen = {}
     try:
         def handle(pkt):
@@ -481,9 +521,12 @@ def net_arp_detect():
 
 def net_portscan_detect():
     header_box("Port Scan Detector", RED)
-    if not _check_root(require_scapy=True):
+    if not HAS_SCAPY:
+        print(f"  {YELLOW}scapy not installed — install with: pip install scapy{RESET}")
         return
     dur = _get_int("Monitor duration (seconds)", 20)
+    if not _ensure_root("net_portscan_detect", dur):
+        return
     hits = defaultdict(int)
     print(f"  {c(f'Detecting port scans for {dur}s...', CYAN)}")
     try:
