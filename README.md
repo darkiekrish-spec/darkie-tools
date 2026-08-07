@@ -1,14 +1,17 @@
 # Darkie Security Suite
 
-Advanced Cybersecurity & Network Defense Platform — 100+ tools across 17 modules.
+Advanced Cybersecurity & Network Defense Platform — 100+ tools across 18 modules.
 **Educational use only. Only test systems you own or have explicit permission to test.**
 
 ## Quick Start
 
 The installer works on **Linux (Ubuntu, Kali, Arch, Debian, Fedora…), macOS
-and Windows (PowerShell / WSL / Git Bash)** — no git clone needed. It auto-detects
-the newest version from the repo and asks whether to **run live** or **install on
-system** (adds a global `darkie-tools` command).
+and Windows (PowerShell / WSL / Git Bash)** — no git clone needed. One script for
+**every** OS: it auto-detects the OS you are on, runs the right installer
+(bash on Linux/macOS, PowerShell on Windows), picks the newest version from the
+repo, and asks whether to **run live** or **install on system** (adds a global
+`darkie-tools` command). On first run it auto-installs every missing Python
+package and system tool (may ask for your sudo/admin password).
 
 **Linux / macOS / WSL / Git Bash:**
 ```bash
@@ -51,7 +54,7 @@ darkie-tools --update     # fetch & upgrade to the newest version at any time
 **Run from source (any OS):**
 ```bash
 git clone https://github.com/darkiekrish-spec/darkie-tools
-cd darkie-tools/v4
+cd darkie-tools/v5
 python3 -m pip install -r requirements.txt
 python3 tool.py                          # Terminal (interactive CLI)
 python3 tool.py --web                    # Web Dashboard -> http://127.0.0.1:5000
@@ -59,7 +62,7 @@ python3 tool.py --gui                    # Desktop GUI (tkinter)
 ```
 
 Prebuilt binaries (`.AppImage`, `.deb`, `.rpm`, `.exe`, macOS `.dmg`) are produced
-locally with `v4/build_all.sh` — they are not committed to the repo.
+locally with `v5/build_all.sh` — they are not committed to the repo.
 
 The Python source is fully self-contained — run it with any Python 3.10+ install
 and dependencies auto-install on first launch.
@@ -68,7 +71,8 @@ and dependencies auto-install on first launch.
 
 | Version | Directory | Description |
 |---------|-----------|-------------|
-| **v4** | `v4/` | **Latest** — Full rewrite, 17 modules, argparse CLI, web + desktop GUIs |
+| **v5** | `v5/` | **Latest** — All v4 features + **Native Toolbox** that detects & launches the security tools already on your OS (Kali/Parrot/...) ready-to-use. 18 modules |
+| **v4** | `v4/` | Full rewrite, 17 modules, argparse CLI, web + desktop GUIs |
 | v3 | `v3/` | Multi-OS, 16 modules, auto-dependency installer, animated UI |
 | v2.2 | `v2.2/` | Refined v2 with full 16 modules and auto-dependency installer |
 | v2.1 | `v2.1/` | "GOAT Edition" — Mineflayer bots, 10 more modules, animated UI |
@@ -98,6 +102,7 @@ and dependencies auto-install on first launch.
 | 15 | WiFi & Wireless | WiFi scanner, security audit (with legal warning) |
 | 16 | Report Generator | HTML report, JSON/CSV export of session findings |
 | 17 | Graphical Interfaces | Web Dashboard + Desktop (tkinter) GUI |
+| 18 | **Native Toolbox** | **Auto-detects the security tools installed on your OS (nmap, sqlmap, hydra, hashcat, msfconsole, aircrack-ng, ...) and launches them ready-to-use — with sudo handled automatically** |
 
 ## Requirements
 

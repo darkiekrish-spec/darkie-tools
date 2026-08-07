@@ -25,6 +25,17 @@ v4/*.dmg
 v4/*.tar.gz
 v4/tool.exe
 
+# v5 build output
+v5/build/
+v5/dist/
+v5/node_modules/
+v5/*.AppImage
+v5/*.deb
+v5/*.rpm
+v5/*.dmg
+v5/*.tar.gz
+v5/tool.exe
+
 # v3 build output
 v3/build/
 v3/dist/
