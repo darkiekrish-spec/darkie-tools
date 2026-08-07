@@ -39,14 +39,40 @@ function Get-LatestVersion {
 }
 
 function Download-File {
-    param($file, $url)
-    if (Test-Path $file) { return $true }
+    param($file, $url, [switch]$Force)
+    if ((Test-Path $file) -and (-not $Force)) { return $true }
     try {
         (New-Object System.Net.WebClient).DownloadFile($url, $file)
         return $true
     } catch {
         return $false
     }
+}
+
+# Read the version string from a local tool.py ("" if unknown/absent)
+function Get-CachedVersion {
+    param($file)
+    if (-not (Test-Path $file)) { return "" }
+    try {
+        $line = Get-Content $file -ErrorAction Stop | Select-String '^VERSION = "([0-9][0-9.]*)"' | Select-Object -First 1
+        if ($line -and $line.Matches) { return $line.Matches[0].Groups[1].Value }
+    } catch {}
+    return ""
+}
+
+# Compare two dotted versions: true if $a >= $b
+function Test-VersionGe {
+    param($a, $b)
+    $aa = $a -split '\.'; $bb = $b -split '\.'
+    $max = [Math]::Max($aa.Count, $bb.Count)
+    for ($i = 0; $i -lt $max; $i++) {
+        $ad = 0; $bd = 0
+        if ($i -lt $aa.Count) { [void][int]::TryParse($aa[$i], [ref]$ad) }
+        if ($i -lt $bb.Count) { [void][int]::TryParse($bb[$i], [ref]$bd) }
+        if ($ad -gt $bd) { return $true }
+        if ($ad -lt $bd) { return $false }
+    }
+    return $true
 }
 
 # Real pip install of runtime deps (skips packaging-only pyinstaller)
@@ -87,17 +113,29 @@ $RAW = "$repoRaw/$VERSION"
 
 # 1) Resolve tool.py (local source, cached copy, or download the latest)
 $toolPy = ""
+$needDownload = $updateMode
 if (-not $updateMode) {
     $localPy = Join-Path $DIR "tool.py"
     if (Test-Path $localPy) { $toolPy = $localPy }
     else {
         $cachedPy = Join-Path $InstallDir "tool.py"
-        if (Test-Path $cachedPy) { $toolPy = $cachedPy }
+        if (Test-Path $cachedPy) {
+            # Re-download if the cached copy is an older version (fixes stuck v4 -> v5)
+            $cachedVer = Get-CachedVersion $cachedPy
+            $latestVer = $VERSION.Substring(1)
+            if ($cachedVer -ne "" -and (Test-VersionGe $cachedVer $latestVer)) {
+                $toolPy = $cachedPy
+            } else {
+                $needDownload = $true
+            }
+        } else {
+            $needDownload = $true
+        }
     }
 }
 
 # 2) Prefer the prebuilt .exe when a release build exists (not during update)
-if ((-not $toolPy) -and (-not $updateMode)) {
+if ((-not $toolPy) -and (-not $updateMode) -and (-not $needDownload)) {
     $exe = Join-Path $InstallDir "tool.exe"
     if (Download-File $exe "$RAW/tool.exe") {
         & $exe ($args | Where-Object { $launcherFlags -notcontains $_ })
@@ -106,16 +144,19 @@ if ((-not $toolPy) -and (-not $updateMode)) {
 }
 
 # 3) Fallback: fetch the source into the install dir
-if ((-not $toolPy) -or $updateMode) {
+if ((-not $toolPy) -or $needDownload) {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $toolPy = Join-Path $InstallDir "tool.py"
     Write-Host ("==> Downloading Darkie TOOLS {0} ..." -f $VERSION)
+    Remove-Item $toolPy -ErrorAction SilentlyContinue
     if (-not (Download-File $toolPy "$RAW/tool.py")) {
         Write-Host "ERROR: Could not download tool.py. Check your internet connection."
         exit 1
     }
     [void](Download-File (Join-Path $InstallDir "requirements.txt") "$RAW/requirements.txt")
     [void](Download-File (Join-Path $InstallDir "mc_bots.js") "$RAW/mc_bots.js")
+    # Also refresh the saved launcher so the installed `darkie-tools` stays current
+    [void](Download-File (Join-Path $InstallDir "tool.ps1") "$RAW/tool.ps1" -Force)
 }
 
 # 4) Ensure Python 3 is available

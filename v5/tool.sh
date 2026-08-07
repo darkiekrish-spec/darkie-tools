@@ -116,24 +116,66 @@ else
     LOCAL_DIR=""
 fi
 
+# Compare dotted versions: a >= b -> exit 0
+_v_ge() {
+    local a b i ad bd max
+    IFS=. read -ra a <<< "$1"
+    IFS=. read -ra b <<< "$2"
+    max=${#a[@]}; (( ${#b[@]} > max )) && max=${#b[@]}
+    for (( i=0; i<max; i++ )); do
+        ad=$(( 10${a[$i]:-0} )); bd=$(( 10${b[$i]:-0} ))
+        (( ad > bd )) && return 0
+        (( ad < bd )) && return 1
+    done
+    return 0
+}
+
+# Read the VERSION embedded in a local tool.py copy (e.g. "5.0.0")
+_cached_version() {
+    local f="$1" v
+    v="$(sed -n 's/^VERSION = "\([0-9][0-9.]*\)".*/\1/p' "$f" 2>/dev/null | head -1)"
+    printf '%s' "$v"
+}
+
 # --------------------------------------------------------------------------
 # 1) Resolve tool.py (local repo dir, cached copy, or download the latest)
 # --------------------------------------------------------------------------
 mkdir -p "$INSTALL_DIR"
 TOOL_PY=""
 NEED_DL="0"
+REFRESH_LAUNCHER="0"
+VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v5"
+NEWEST="${VERSION#v}"
+
 if [ "$UPDATE_MODE" = "1" ]; then
     NEED_DL="1"                                      # --update: always refresh
 elif [ -n "$LOCAL_DIR" ] && [ -f "$LOCAL_DIR/tool.py" ]; then
-    TOOL_PY="$LOCAL_DIR/tool.py"                     # run straight from repo dir
+    if [ "$LOCAL_DIR" = "$INSTALL_DIR" ]; then
+        # Running the installed launcher: verify the cached copy's version too
+        CACHED="$(_cached_version "$LOCAL_DIR/tool.py")"
+        if [ -n "$CACHED" ] && _v_ge "$CACHED" "$NEWEST"; then
+            TOOL_PY="$LOCAL_DIR/tool.py"
+        else
+            echo "==> Local copy is out of date${CACHED:+ (v$CACHED)}. Updating to $VERSION ..."
+            NEED_DL="1"
+        fi
+    else
+        TOOL_PY="$LOCAL_DIR/tool.py"                 # run straight from repo dir
+    fi
 elif [ -f "$INSTALL_DIR/tool.py" ]; then
-    TOOL_PY="$INSTALL_DIR/tool.py"                   # already cached/installed
+    CACHED="$(_cached_version "$INSTALL_DIR/tool.py")"
+    if [ -n "$CACHED" ] && _v_ge "$CACHED" "$NEWEST"; then
+        TOOL_PY="$INSTALL_DIR/tool.py"               # cached copy is current
+    else
+        # Cached copy is stale (e.g. v4 present while v5 is latest) -> refresh
+        echo "==> Local copy is out of date${CACHED:+ (v$CACHED)}. Updating to $VERSION ..."
+        NEED_DL="1"
+    fi
 else
     NEED_DL="1"
 fi
 
 if [ "$NEED_DL" = "1" ]; then
-    VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v5"
     # Prefer a prebuilt binary when a release build exists (no Python needed)
     if [ "$UPDATE_MODE" != "1" ] && download "$RAW_BASE/$VERSION/tool.AppImage" "$INSTALL_DIR/tool.AppImage"; then
         chmod +x "$INSTALL_DIR/tool.AppImage"
@@ -146,6 +188,9 @@ if [ "$NEED_DL" = "1" ]; then
     fi
     download "$RAW_BASE/$VERSION/requirements.txt" "$INSTALL_DIR/requirements.txt" || true
     download "$RAW_BASE/$VERSION/mc_bots.js" "$INSTALL_DIR/mc_bots.js" || true
+    # Refresh the stored launcher AFTER tool.py exits (can't overwrite the
+    # currently-executing file mid-run — it would corrupt bash).
+    REFRESH_LAUNCHER="1"
     TOOL_PY="$INSTALL_DIR/tool.py"
 fi
 
@@ -188,9 +233,12 @@ if [ "$INSTALL_MODE" = "1" ]; then
         cp -f "$LOCAL_DIR/requirements.txt" "$INSTALL_DIR/requirements.txt" 2>/dev/null || true
     fi
     TOOL_PY="$INSTALL_DIR/tool.py"
-    # Keep a copy of this launcher so `darkie-tools --update` works later
+    # Keep a fresh copy of this launcher so `darkie-tools --update` works later.
+    # If we ARE the stored launcher, defer the refresh until after tool.py exits.
     VERSION="$(detect_latest)"; [ -z "$VERSION" ] && VERSION="v5"
-    if [ ! -f "$INSTALL_DIR/tool.sh" ]; then
+    if [ "$0" = "$INSTALL_DIR/tool.sh" ]; then
+        REFRESH_LAUNCHER="1"
+    elif [ ! -f "$INSTALL_DIR/tool.sh" ] || [ "$UPDATE_MODE" = "1" ]; then
         download "$RAW_BASE/$VERSION/tool.sh" "$INSTALL_DIR/tool.sh" || true
     fi
     chmod +x "$INSTALL_DIR/tool.sh" 2>/dev/null || true
@@ -221,3 +269,15 @@ for a in "$@"; do
 done
 
 reattach_tty "$PY" "$TOOL_PY" "${ARGS[@]}"
+_rc=$?
+
+# Deferred launcher refresh: only now that the old script is done executing can
+# we safely replace it (atomic tmp+mv).
+if [ "$REFRESH_LAUNCHER" = "1" ]; then
+    if download "$RAW_BASE/$VERSION/tool.sh" "$INSTALL_DIR/tool.sh.tmp" && mv -f "$INSTALL_DIR/tool.sh.tmp" "$INSTALL_DIR/tool.sh"; then
+        chmod +x "$INSTALL_DIR/tool.sh" 2>/dev/null || true
+        echo "==> Launcher updated to $VERSION (run \`darkie-tools\` to use it)."
+    fi
+fi
+
+exit $_rc

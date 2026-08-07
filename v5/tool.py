@@ -3476,11 +3476,190 @@ def _native_status():
     return len([p for p in found.values() if p]), len(found)
 
 
+# ── Auto-install recipes so the Toolbox works on EVERY OS (not just Kali) ──
+# tool: (apt_pkg, brew_pkg, choco_pkg, pip_pkg)  — "" means "use the tool name"
+NATIVE_INSTALL = {
+    "nmap": ("nmap", "nmap", "nmap", ""),
+    "masscan": ("masscan", "masscan", "masscan", ""),
+    "whois": ("whois", "whois", "whois", ""),
+    "dnsrecon": ("dnsrecon", "dnsrecon", "dnsrecon", ""),
+    "dnsenum": ("dnsenum", "dnsenum", "dnsenum", ""),
+    "fierce": ("fierce", "fierce", "fierce", ""),
+    "theHarvester": ("theharvester", "theharvester", "", "theHarvester"),
+    "recon-ng": ("recon-ng", "recon-ng", "", "recon-ng"),
+    "amass": ("amass", "amass", "amass", "amass"),
+    "legion": ("legion", "legion", "", "legion"),
+    "sublist3r": ("sublist3r", "sublist3r", "", "sublist3r"),
+    "gobuster": ("gobuster", "gobuster", "gobuster", ""),
+    "dirb": ("dirb", "dirb", "dirb", ""),
+    "ffuf": ("ffuf", "ffuf", "ffuf", ""),
+    "nikto": ("nikto", "nikto", "nikto", ""),
+    "wpscan": ("wpscan", "wpscan", "", "wpscan"),
+    "sqlmap": ("sqlmap", "sqlmap", "sqlmap", "sqlmap"),
+    "commix": ("commix", "", "", "commix"),
+    "xsser": ("xsser", "xsser", "", ""),
+    "weevely": ("weevely", "", "", "weevely"),
+    "hash-identifier": ("hash-identifier", "", "", "hashid"),
+    "msfconsole": ("metasploit-framework", "metasploit", "metasploit", ""),
+    "msfvenom": ("metasploit-framework", "metasploit", "metasploit", ""),
+    "searchsploit": ("exploitdb", "exploitdb", "", ""),
+    "setoolkit": ("set", "", "", ""),
+    "beef-xss": ("beef-xss", "beef", "beef", ""),
+    "john": ("john", "john", "john-the-ripper", ""),
+    "hashcat": ("hashcat", "hashcat", "hashcat", ""),
+    "hydra": ("hydra", "hydra", "hydra", ""),
+    "medusa": ("medusa", "medusa", "medusa", ""),
+    "ncrack": ("ncrack", "ncrack", "ncrack", ""),
+    "crunch": ("crunch", "crunch", "", ""),
+    "cewl": ("cewl", "cewl", "", ""),
+    "aircrack-ng": ("aircrack-ng", "aircrack-ng", "aircrack-ng", ""),
+    "aireplay-ng": ("aircrack-ng", "aircrack-ng", "aircrack-ng", ""),
+    "airodump-ng": ("aircrack-ng", "aircrack-ng", "aircrack-ng", ""),
+    "reaver": ("reaver", "reaver", "", ""),
+    "bully": ("bully", "", "", ""),
+    "wifite": ("wifite", "wifite", "", ""),
+    "macchanger": ("macchanger", "macchanger", "", ""),
+    "mdk3": ("mdk3", "", "", ""),
+    "mdk4": ("mdk4", "", "", ""),
+    "tcpdump": ("tcpdump", "tcpdump", "tcpdump", ""),
+    "tshark": ("tshark", "tshark", "wireshark", ""),
+    "wireshark": ("wireshark", "wireshark", "wireshark", ""),
+    "netcat": ("netcat-openbsd", "netcat", "netcat", ""),
+    "nc": ("netcat-openbsd", "netcat", "netcat", ""),
+    "ncat": ("nmap", "nmap", "nmap", ""),
+    "socat": ("socat", "socat", "socat", ""),
+    "hping3": ("hping3", "hping3", "", ""),
+    "arpspoof": ("dsniff", "dsniff", "", ""),
+    "ettercap": ("ettercap", "ettercap", "ettercap", ""),
+    "dsniff": ("dsniff", "dsniff", "", ""),
+    "bettercap": ("bettercap", "bettercap", "", "bettercap"),
+    "responder": ("responder", "responder", "", "responder"),
+    "binwalk": ("binwalk", "binwalk", "binwalk", ""),
+    "exiftool": ("exiftool", "exiftool", "exiftool", ""),
+    "foremost": ("foremost", "foremost", "", ""),
+    "steghide": ("steghide", "steghide", "", ""),
+    "strings": ("binutils", "binutils", "", ""),
+    "enum4linux": ("enum4linux", "enum4linux", "", "enum4linux"),
+    "smbmap": ("smbmap", "smbmap", "", "smbmap"),
+    "ldapsearch": ("ldap-utils", "openldap", "", ""),
+    "evil-winrm": ("evil-winrm", "evil-winrm", "", ""),
+    "crackmapexec": ("crackmapexec", "", "", "crackmapexec"),
+    "chisel": ("chisel", "chisel", "", ""),
+}
+
+
+def _pkg_manager():
+    """Detect the OS package manager: apt / dnf / pacman / brew / choco / winget / pip."""
+    if platform.system().lower() == "windows":
+        if _which("choco"):
+            return "choco"
+        if _which("winget"):
+            return "winget"
+        return None
+    if _which("apt-get"):
+        return "apt"
+    if _which("dnf"):
+        return "dnf"
+    if _which("pacman"):
+        return "pacman"
+    if _which("brew"):
+        return "brew"
+    return None
+
+
+def _native_install(tool):
+    """Install one Toolbox tool using the OS package manager (or pip)."""
+    recipe = NATIVE_INSTALL.get(tool)
+    if not recipe:
+        print(f"  {YELLOW}No install recipe for {tool}.{RESET}")
+        return
+    apt_pkg, brew_pkg, choco_pkg, pip_pkg = recipe
+    pm = _pkg_manager()
+    pkg = ""
+    if pm == "apt":
+        pkg = apt_pkg or tool
+    elif pm in ("dnf", "pacman"):
+        pkg = apt_pkg or tool
+    elif pm == "brew":
+        pkg = brew_pkg or tool
+    elif pm in ("choco", "winget"):
+        pkg = choco_pkg or tool
+
+    if pm in ("apt", "dnf", "pacman", "brew", "choco", "winget") and pkg:
+        if pm == "apt":
+            cmd = ["apt-get", "install", "-y", pkg]
+            if not _is_root() and _which("sudo"):
+                cmd = ["sudo"] + cmd
+        elif pm == "dnf":
+            cmd = ["dnf", "install", "-y", pkg]
+            if not _is_root() and _which("sudo"):
+                cmd = ["sudo"] + cmd
+        elif pm == "pacman":
+            cmd = ["pacman", "-S", "--noconfirm", pkg]
+            if not _is_root() and _which("sudo"):
+                cmd = ["sudo"] + cmd
+        elif pm == "brew":
+            cmd = ["brew", "install", pkg]
+        elif pm == "choco":
+            cmd = ["choco", "install", "-y", pkg]
+        else:
+            cmd = ["winget", "install", "--accept-package-agreements", "--accept-source-agreements", pkg]
+        print(f"  {c('Installing: ' + ' '.join(cmd), CYAN)}  (may ask for your password)\n")
+        try:
+            subprocess.call(cmd)
+        except Exception as e:
+            print(f"  {RED}{SYM_X} {e}{RESET}")
+        if _which(tool):
+            print(f"  {GREEN}{SYM_CHECK} {tool} installed successfully.{RESET}")
+        else:
+            print(f"  {YELLOW}{SYM_WARN} {tool} still not found. Try: {' '.join(cmd)} manually, or use pip:{RESET}")
+    elif pip_pkg:
+        _py = _which("python3") or _which("python")
+        if not _py:
+            print(f"  {YELLOW}pip not available.{RESET}")
+            return
+        print(f"  {c(f'Installing via pip: {pip_pkg}', CYAN)}\n")
+        try:
+            subprocess.call([_py, "-m", "pip", "install", "--user", pip_pkg])
+        except Exception as e:
+            print(f"  {RED}{SYM_X} {e}{RESET}")
+        if _which(tool):
+            print(f"  {GREEN}{SYM_CHECK} {tool} installed successfully.{RESET}")
+    else:
+        print(f"  {YELLOW}No package-manager recipe for {tool} on this OS. Install it manually.{RESET}")
+    print()
+    input(f"  {c('Press Enter to continue...', CYAN)}")
+
+
+def _native_install_all():
+    """Offer to install every missing Toolbox tool (Kali/Ubuntu/macOS/Windows)."""
+    found = _native_installed()
+    missing = [name for name, *_ in _native_catalog() if not found.get(name)]
+    if not missing:
+        print(f"  {GREEN}{SYM_CHECK} All Toolbox tools are already installed.{RESET}")
+        print()
+        input(f"  {c('Press Enter to continue...', CYAN)}")
+        return
+    print(f"  {c(f'{len(missing)} tools are missing on this OS:', YELLOW)}")
+    print(f"  {c(', '.join(missing), DIM)}")
+    print(f"  {c('The installer will download them with your OS package manager' + (f' ({_pkg_manager() or "pip"})' if _pkg_manager() else ' (pip)') + '.', CYAN)}")
+    if not _yes("Install all missing tools now? (needs internet + maybe admin)"):
+        return
+    for name in missing:
+        print(f"\n  {c(SYM_ARROW + ' Installing ' + name + ' ...', GREEN)}")
+        _native_install(name)
+    print(f"  {GREEN}{SYM_CHECK} Done. Reopen the Toolbox to use the newly installed tools.{RESET}")
+
+
 def _native_launch(tool, needs_root, example):
     path = _native_installed().get(tool)
     if not path:
         print(f"  {RED}{SYM_X} {tool} not installed on this system.{RESET}")
-        return
+        if _yes(f"Install {tool} automatically now? (uses your OS package manager)"):
+            _native_install(tool)
+            path = _native_installed().get(tool)
+        if not path:
+            return
     print(f"  {c(f'Launching {tool} — {path}', GREEN)}")
     print(f"  {c(f'Example: {tool} {example}', DIM)}" if example else "")
     if needs_root and not _is_root():
@@ -3517,6 +3696,7 @@ def menu_native():
             have = sum(1 for name, c, *_ in _native_catalog() if c == i - 1 and found.get(name))
             print(f"  {c(f'[{i}]', color)}  {cat_name:<24} {c(f'({have} ready)', GREEN if have else RED)}")
         print(f"  {c('[a]', YELLOW)}  Show ALL installed tools")
+        print(f"  {c('[i]', YELLOW)}  Install ALL missing tools (auto-detects your OS)")
         print(f"  {c('[b]', YELLOW)}  Back to main menu")
         print()
         ch = input(f"  {c(f'Choice {SYM_PROMPT} ', CYAN)}").strip().lower()
@@ -3524,6 +3704,10 @@ def menu_native():
             break
         if ch == "a":
             _native_list_all(found)
+            continue
+        if ch == "i":
+            _native_install_all()
+            found = _native_installed()
             continue
         if ch.isdigit() and 1 <= int(ch) <= len(cats):
             cat_idx = int(ch) - 1
